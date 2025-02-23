@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=2 python experiments.py > experiments2.out 2>&1
