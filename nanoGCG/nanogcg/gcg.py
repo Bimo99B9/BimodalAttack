@@ -45,14 +45,6 @@ def timed_section(section_name: str):
 
 
 @dataclass
-class ProbeSamplingConfig:
-    draft_model: transformers.PreTrainedModel
-    draft_tokenizer: transformers.PreTrainedTokenizer
-    r: int = 8
-    sampling_factor: int = 16
-
-
-@dataclass
 class GCGConfig:
     num_steps: int = 250
     optim_str_init: Union[str, List[str]] = "x x x x x x x x x x x x x x x x x x x x"
@@ -70,11 +62,8 @@ class GCGConfig:
     add_space_before_target: bool = False
     seed: int = None
     verbosity: str = "INFO"
-    probe_sampling_config: Optional[ProbeSamplingConfig] = None
     dynamic_search: bool = False
     min_search_width: int = 32
-    use_embedding_grad: bool = False
-    weighted_sampling: bool = False
 
 
 @dataclass
@@ -128,7 +117,6 @@ def sample_ids_from_grad(
     topk: int = 256,
     n_replace: int = 1,
     not_allowed_ids: Tensor = False,
-    weighted_sampling: bool = False,
 ):
     """Returns `search_width` combinations of token ids based on the token gradient.
 
@@ -145,9 +133,6 @@ def sample_ids_from_grad(
             the number of token positions to update per sequence
         not_allowed_ids : Tensor, shape = (n_ids)
             the token ids that should not be used in optimization
-        weighted_sampling : bool
-            if True, sample from the top-k tokens with probability proportional to the (softmaxed) gradient values;
-            otherwise, sample uniformly.
 
     Returns:
         sampled_ids : Tensor, shape = (search_width, n_optim_ids)
@@ -159,12 +144,7 @@ def sample_ids_from_grad(
     if not_allowed_ids is not None:
         grad[:, not_allowed_ids.to(grad.device)] = float("inf")
 
-    if weighted_sampling:
-        # Compute both topk indices and values for each token position
-        topk_values = (-grad).topk(topk, dim=1).values  # shape: (n_optim_tokens, topk)
-        topk_ids = (-grad).topk(topk, dim=1).indices  # shape: (n_optim_tokens, topk)
-    else:
-        topk_ids = (-grad).topk(topk, dim=1).indices
+    topk_ids = (-grad).topk(topk, dim=1).indices
 
     # Randomly choose positions to replace (n_replace per candidate)
     sampled_ids_pos = torch.argsort(
@@ -173,30 +153,11 @@ def sample_ids_from_grad(
         ..., :n_replace
     ]  # shape: (search_width, n_replace)
 
-    if weighted_sampling:
-        topk_values_selected = topk_values[sampled_ids_pos]
-        probs = torch.nn.functional.softmax(
-            topk_values_selected, dim=-1
-        )  # shape: (search_width, n_replace, topk)
-        probs_flat = probs.view(-1, topk)  # shape: (search_width * n_replace, topk)
-        sampled_idx_flat = torch.multinomial(probs_flat, num_samples=1).squeeze(
-            -1
-        )  # shape: (search_width * n_replace)
-        sampled_idx = sampled_idx_flat.view(
-            search_width, n_replace
-        )  # shape: (search_width, n_replace)
-        topk_ids_selected = topk_ids[
-            sampled_ids_pos
-        ]  # shape: (search_width, n_replace, topk)
-        sampled_ids_val = torch.gather(
-            topk_ids_selected, 2, sampled_idx.unsqueeze(-1)
-        ).squeeze(-1)
-    else:
-        sampled_ids_val = torch.gather(
-            topk_ids[sampled_ids_pos],
-            2,
-            torch.randint(0, topk, (search_width, n_replace, 1), device=grad.device),
-        ).squeeze(2)
+    sampled_ids_val = torch.gather(
+        topk_ids[sampled_ids_pos],
+        2,
+        torch.randint(0, topk, (search_width, n_replace, 1), device=grad.device),
+    ).squeeze(2)
 
     new_ids = original_ids.scatter_(1, sampled_ids_pos, sampled_ids_val)
     return new_ids
@@ -260,12 +221,6 @@ class GCG:
         self.draft_model = None
         self.draft_tokenizer = None
         self.draft_embedding_layer = None
-        if self.config.probe_sampling_config:
-            self.draft_model = self.config.probe_sampling_config.draft_model
-            self.draft_tokenizer = self.config.probe_sampling_config.draft_tokenizer
-            self.draft_embedding_layer = self.draft_model.get_input_embeddings()
-            if self.draft_tokenizer.pad_token is None:
-                configure_pad_token(self.draft_tokenizer)
 
         if model.dtype in (torch.float32, torch.float64):
             logger.warning(
@@ -344,44 +299,6 @@ class GCG:
         self.after_embeds = after_embeds
         self.target_embeds = target_embeds
 
-        if config.probe_sampling_config:
-            assert (
-                self.draft_model and self.draft_tokenizer and self.draft_embedding_layer
-            ), "Draft model wasn't properly set up."
-
-            with timed_section("Draft tokenization for before, after, and target"):
-                draft_before_ids = self.draft_tokenizer(
-                    [before_str], padding=False, return_tensors="pt"
-                )["input_ids"].to(model.device, torch.int64)
-                draft_after_ids = self.draft_tokenizer(
-                    [after_str], add_special_tokens=False, return_tensors="pt"
-                )["input_ids"].to(model.device, torch.int64)
-                self.draft_target_ids = self.draft_tokenizer(
-                    [target], add_special_tokens=False, return_tensors="pt"
-                )["input_ids"].to(model.device, torch.int64)
-
-            with timed_section("Draft embedding for before, after, and target"):
-                (
-                    self.draft_before_embeds,
-                    self.draft_after_embeds,
-                    self.draft_target_embeds,
-                ) = [
-                    self.draft_embedding_layer(ids)
-                    for ids in (
-                        draft_before_ids,
-                        draft_after_ids,
-                        self.draft_target_ids,
-                    )
-                ]
-
-            if config.use_prefix_cache:
-                with torch.no_grad():
-                    with timed_section("Draft prefix cache computation"):
-                        output = self.draft_model(
-                            inputs_embeds=self.draft_before_embeds, use_cache=True
-                        )
-                        self.draft_prefix_cache = output.past_key_values
-
         with timed_section("Attack buffer initialization"):
             buffer = self.init_buffer()
         optim_ids = buffer.get_best_ids()
@@ -421,7 +338,6 @@ class GCG:
                     config.topk,
                     config.n_replace,
                     not_allowed_ids=self.not_allowed_ids,
-                    weighted_sampling=config.weighted_sampling,
                 )
                 if config.filter_ids:
                     sampled_ids = filter_ids(sampled_ids, tokenizer)
@@ -457,16 +373,11 @@ class GCG:
                             dim=1,
                         )
 
-                    if self.config.probe_sampling_config is None:
-                        loss = find_executable_batch_size(
-                            self._compute_candidates_loss_original, batch_size
-                        )(input_embeds)
-                        current_loss = loss.min().item()
-                        optim_ids = sampled_ids[loss.argmin()].unsqueeze(0)
-                    else:
-                        current_loss, optim_ids = find_executable_batch_size(
-                            self._compute_candidates_loss_probe_sampling, batch_size
-                        )(input_embeds, sampled_ids)
+                    loss = find_executable_batch_size(
+                        self._compute_candidates_loss_original, batch_size
+                    )(input_embeds)
+                    current_loss = loss.min().item()
+                    optim_ids = sampled_ids[loss.argmin()].unsqueeze(0)
                     loss_time = time.perf_counter() - start_loss
                     total_loss_time += loss_time
 
@@ -715,159 +626,6 @@ class GCG:
                 gc.collect()
                 torch.cuda.empty_cache()
         return torch.cat(all_loss, dim=0)
-
-    def _compute_candidates_loss_probe_sampling(
-        self,
-        search_batch_size: int,
-        input_embeds: Tensor,
-        sampled_ids: Tensor,
-    ) -> Tuple[float, Tensor]:
-        probe_sampling_config = self.config.probe_sampling_config
-        assert probe_sampling_config, "Probe sampling config wasn't set up properly."
-        B = input_embeds.shape[0]
-        probe_size = B // probe_sampling_config.sampling_factor
-        probe_idxs = torch.randperm(B)[:probe_size].to(input_embeds.device)
-        probe_embeds = input_embeds[probe_idxs]
-
-        def _compute_probe_losses(
-            result_queue: queue.Queue, search_batch_size: int, probe_embeds: Tensor
-        ) -> None:
-            probe_losses = self._compute_candidates_loss_original(
-                search_batch_size, probe_embeds
-            )
-            result_queue.put(("probe", probe_losses))
-
-        def _compute_draft_losses(
-            result_queue: queue.Queue, search_batch_size: int, draft_sampled_ids: Tensor
-        ) -> None:
-            assert (
-                self.draft_model and self.draft_embedding_layer
-            ), "Draft model and embedding layer weren't initialized properly."
-            draft_losses = []
-            draft_prefix_cache_batch = None
-            for i in range(0, B, search_batch_size):
-                with torch.no_grad():
-                    batch_size = min(search_batch_size, B - i)
-                    draft_sampled_ids_batch = draft_sampled_ids[i : i + batch_size]
-                    if self.draft_prefix_cache:
-                        if (
-                            not draft_prefix_cache_batch
-                            or batch_size != search_batch_size
-                        ):
-                            draft_prefix_cache_batch = [
-                                [
-                                    x.expand(batch_size, -1, -1, -1)
-                                    for x in self.draft_prefix_cache[i]
-                                ]
-                                for i in range(len(self.draft_prefix_cache))
-                            ]
-                        draft_embeds = torch.cat(
-                            [
-                                self.draft_embedding_layer(draft_sampled_ids_batch),
-                                self.draft_after_embeds.repeat(batch_size, 1, 1),
-                                self.draft_target_embeds.repeat(batch_size, 1, 1),
-                            ],
-                            dim=1,
-                        )
-                        draft_output = self.draft_model(
-                            inputs_embeds=draft_embeds,
-                            past_key_values=draft_prefix_cache_batch,
-                        )
-                    else:
-                        draft_embeds = torch.cat(
-                            [
-                                self.draft_before_embeds.repeat(batch_size, 1, 1),
-                                self.draft_embedding_layer(draft_sampled_ids_batch),
-                                self.draft_after_embeds.repeat(batch_size, 1, 1),
-                                self.draft_target_embeds.repeat(batch_size, 1, 1),
-                            ],
-                            dim=1,
-                        )
-                        draft_output = self.draft_model(inputs_embeds=draft_embeds)
-                    draft_logits = draft_output.logits
-                    tmp = draft_embeds.shape[1] - self.draft_target_ids.shape[1]
-                    shift_logits = draft_logits[..., tmp - 1 : -1, :].contiguous()
-                    shift_labels = self.draft_target_ids.repeat(batch_size, 1)
-                    if self.config.use_mellowmax:
-                        label_logits = torch.gather(
-                            shift_logits, -1, shift_labels.unsqueeze(-1)
-                        ).squeeze(-1)
-                        loss = mellowmax(
-                            -label_logits, alpha=self.config.mellowmax_alpha, dim=-1
-                        )
-                    else:
-                        loss = (
-                            torch.nn.functional.cross_entropy(
-                                shift_logits.view(-1, shift_logits.size(-1)),
-                                shift_labels.view(-1),
-                                reduction="none",
-                            )
-                            .view(batch_size, -1)
-                            .mean(dim=-1)
-                        )
-                    draft_losses.append(loss)
-            draft_losses = torch.cat(draft_losses)
-            result_queue.put(("draft", draft_losses))
-
-        def _convert_to_draft_tokens(token_ids: Tensor) -> Tensor:
-            decoded_text_list = self.tokenizer.batch_decode(token_ids)
-            assert self.draft_tokenizer, "Draft tokenizer wasn't properly initialized."
-            return self.draft_tokenizer(
-                decoded_text_list,
-                add_special_tokens=False,
-                padding=True,
-                return_tensors="pt",
-            )["input_ids"].to(self.draft_model.device, torch.int64)
-
-        result_queue = queue.Queue()
-        draft_sampled_ids = _convert_to_draft_tokens(sampled_ids)
-        draft_thread = threading.Thread(
-            target=_compute_draft_losses,
-            args=(result_queue, search_batch_size, draft_sampled_ids),
-        )
-        probe_thread = threading.Thread(
-            target=_compute_probe_losses,
-            args=(result_queue, search_batch_size, probe_embeds),
-        )
-        draft_thread.start()
-        probe_thread.start()
-        draft_thread.join()
-        probe_thread.join()
-        results = {}
-        while not result_queue.empty():
-            key, value = result_queue.get()
-            results[key] = value
-        probe_losses = results["probe"]
-        draft_losses = results["draft"]
-        draft_probe_losses = draft_losses[probe_idxs]
-        rank_correlation = spearmanr(
-            probe_losses.cpu().type(torch.float32).numpy(),
-            draft_probe_losses.cpu().type(torch.float32).numpy(),
-        ).correlation
-        if torch.isnan(torch.tensor(rank_correlation)):
-            alpha = 0.5
-        else:
-            alpha = (1 + rank_correlation) / 2
-        R = probe_sampling_config.r
-        filtered_size = int((1 - alpha) * B / R)
-        filtered_size = max(1, min(filtered_size, B))
-        _, top_indices = torch.topk(draft_losses, k=filtered_size, largest=False)
-        filtered_embeds = input_embeds[top_indices]
-        filtered_losses = self._compute_candidates_loss_original(
-            search_batch_size, filtered_embeds
-        )
-        best_probe_loss = probe_losses.min().item()
-        best_filtered_loss = filtered_losses.min().item()
-        probe_ids = sampled_ids[probe_idxs]
-        filtered_ids = sampled_ids[top_indices]
-        return (
-            (best_probe_loss, probe_ids[probe_losses.argmin()].unsqueeze(0))
-            if best_probe_loss < best_filtered_loss
-            else (
-                best_filtered_loss,
-                filtered_ids[filtered_losses.argmin()].unsqueeze(0),
-            )
-        )
 
 
 def run(
