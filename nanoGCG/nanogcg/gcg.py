@@ -7,6 +7,7 @@ import time
 from contextlib import contextmanager
 
 from dataclasses import dataclass
+import numpy as np
 from tqdm import tqdm
 from typing import List, Optional, Tuple, Union
 
@@ -23,6 +24,10 @@ from nanogcg.utils import (
     get_nonascii_toks,
     mellowmax,
 )
+
+import requests
+from PIL import Image
+import torchvision.transforms.functional as F
 
 logger = logging.getLogger("nanogcg")
 if not logger.hasHandlers():
@@ -64,7 +69,6 @@ class GCGConfig:
     verbosity: str = "INFO"
     dynamic_search: bool = False
     min_search_width: int = 32
-
 
 @dataclass
 class GCGResult:
@@ -108,6 +112,8 @@ class AttackBuffer:
             optim_str = optim_str.replace("\n", "\\n")
             message += f"\nloss: {loss}" + f" | string: {optim_str}"
         logger.info(message)
+        
+
 
 
 def sample_ids_from_grad(
@@ -118,25 +124,8 @@ def sample_ids_from_grad(
     n_replace: int = 1,
     not_allowed_ids: Tensor = False,
 ):
-    """Returns `search_width` combinations of token ids based on the token gradient.
-
-    Args:
-        ids : Tensor, shape = (n_optim_ids)
-            the sequence of token ids that are being optimized
-        grad : Tensor, shape = (n_optim_ids, vocab_size)
-            the gradient (in vocab space) computed with respect to the tokens
-        search_width : int
-            the number of candidate sequences to return
-        topk : int
-            the topk to be used when sampling from the gradient
-        n_replace : int
-            the number of token positions to update per sequence
-        not_allowed_ids : Tensor, shape = (n_ids)
-            the token ids that should not be used in optimization
-
-    Returns:
-        sampled_ids : Tensor, shape = (search_width, n_optim_ids)
-            sampled token ids
+    """
+    Returns `search_width` combinations of token ids based on the token gradient.
     """
     n_optim_tokens = len(ids)
     original_ids = ids.repeat(search_width, 1)
@@ -164,17 +153,8 @@ def sample_ids_from_grad(
 
 
 def filter_ids(ids: Tensor, tokenizer: transformers.PreTrainedTokenizer):
-    """Filters out sequences of token ids that change after retokenization.
-
-    Args:
-        ids : Tensor, shape = (search_width, n_optim_ids)
-            token ids
-        tokenizer : ~transformers.PreTrainedTokenizer
-            the model's tokenizer
-
-    Returns:
-        filtered_ids : Tensor, shape = (new_search_width, n_optim_ids)
-            all token ids that are the same after retokenization
+    """
+    Filters out sequences of token ids that change after retokenization.
     """
     ids_decoded = tokenizer.batch_decode(ids)
     filtered_ids = []
@@ -202,10 +182,16 @@ class GCG:
         model: transformers.PreTrainedModel,
         tokenizer: transformers.PreTrainedTokenizer,
         config: GCGConfig,
+        transform = None,
+        normalize = None,
     ):
+        # If the provided tokenizer does not have attribute 'vocab_size',
+        # assume it's a processor and use its underlying tokenizer.
         self.model = model
         self.tokenizer = tokenizer
         self.config = config
+        self.transform = transform
+        self.normalize = normalize
 
         self.embedding_layer = model.get_input_embeddings()
         self.not_allowed_ids = (
@@ -232,7 +218,7 @@ class GCG:
                 "Model is on the CPU. Use a hardware accelerator for faster optimization."
             )
 
-        if not tokenizer.chat_template:
+        if not hasattr(tokenizer, "chat_template") or not tokenizer.chat_template:
             logger.warning(
                 "Tokenizer does not have a chat template. Assuming base model and setting chat template to empty."
             )
@@ -309,12 +295,22 @@ class GCG:
         total_gradient_time = 0.0
         total_sampling_time = 0.0
         total_loss_time = 0.0
-
+        
+        
+        image_file = "http://images.cocodataset.org/val2017/000000039769.jpg"
+        raw_image = Image.open(requests.get(image_file, stream=True).raw)
+        image = self.transform(raw_image).unsqueeze(0).to(model.device)
+        image_original = image.clone()
+        eps = 8/255
+        alpha = 0.2
+        
         for i in tqdm(range(config.num_steps)):
+            image.requires_grad = True
             iter_start = time.perf_counter()
             with timed_section(f"Iteration {i}: Compute token gradient"):
                 start_grad = time.perf_counter()
-                optim_ids_onehot_grad = self.compute_token_gradient(optim_ids)
+                optim_ids_onehot_grad, image_grad = self.compute_gradient(optim_ids, image)
+                logger.warning(f"{optim_ids_onehot_grad.shape} {image_grad.shape}")  
                 grad_time = time.perf_counter() - start_grad
                 total_gradient_time += grad_time
 
@@ -329,6 +325,27 @@ class GCG:
                 f"[Iteration {i}] Using dynamic search width: {current_search_width}"
             )
 
+
+            with timed_section(f"Iteration {i}: PGD Update"):
+                start_sample = time.perf_counter()
+
+                # Update the image
+                image = (image - alpha * eps * torch.sign(image_grad)).detach()
+                image = torch.clamp(image, image_original-eps, image_original+eps)
+                image = torch.clamp(image, 0, 1)
+                
+                if i % 10 == 0:
+                    image_np = image.squeeze(0).detach().cpu().numpy()
+                    image_np = image_np.transpose(1, 2, 0)
+                    image_np = (image_np * 255).astype(np.uint8)
+                    image_pil = Image.fromarray(image_np)
+                    image_pil.save(f"out_imgs/image_{i}.png")
+                
+
+                sampling_time = time.perf_counter() - start_sample
+                total_sampling_time += sampling_time
+            
+            
             with timed_section(f"Iteration {i}: Candidate sampling"):
                 start_sample = time.perf_counter()
                 sampled_ids = sample_ids_from_grad(
@@ -500,25 +517,18 @@ class GCG:
     def compute_token_gradient(self, optim_ids: Tensor) -> Tensor:
         """
         Computes the gradient of the GCG loss with respect to the tokens.
-        If use_embedding_grad is False, computes the gradient with respect to the one-hot representation.
-        If True, computes the gradient with respect to the embedding vectors (which are then projected back to vocab space).
         """
         model = self.model
         embedding_layer = self.embedding_layer
 
-        if self.config.use_embedding_grad:
-            # Compute embeddings directly from token ids
-            optim_embeds = self.embedding_layer(optim_ids).detach()
-            optim_embeds.requires_grad_()
-        else:
-            # Compute one-hot representation
-            optim_ids_onehot = torch.nn.functional.one_hot(
-                optim_ids, num_classes=embedding_layer.num_embeddings
-            )
-            optim_ids_onehot = optim_ids_onehot.to(model.device, model.dtype)
-            optim_ids_onehot.requires_grad_()
-            # Multiply one-hot by weight to get embeddings
-            optim_embeds = optim_ids_onehot @ embedding_layer.weight
+        # Compute one-hot representation
+        optim_ids_onehot = torch.nn.functional.one_hot(
+            optim_ids, num_classes=embedding_layer.num_embeddings
+        )
+        optim_ids_onehot = optim_ids_onehot.to(model.device, model.dtype)
+        optim_ids_onehot.requires_grad_()
+        # Multiply one-hot by weight to get embeddings
+        optim_embeds = optim_ids_onehot @ embedding_layer.weight
 
         if self.prefix_cache:
             input_embeds = torch.cat(
@@ -556,15 +566,78 @@ class GCG:
                 shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
 
-        if self.config.use_embedding_grad:
-            # Compute gradient with respect to the embeddings and then project back to vocab space.
-            grad_embeds = torch.autograd.grad(loss, optim_embeds)[0]
-            # Project the gradient from embedding space back to vocab space:
-            grad_vocab = grad_embeds @ embedding_layer.weight.T
-            return grad_vocab
+        optim_ids_onehot_grad = torch.autograd.grad(loss, optim_ids_onehot)[0]
+        return optim_ids_onehot_grad
+
+
+    def compute_gradient(self, optim_ids: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the gradient of the GCG loss with respect to the tokens,
+        incorporating an image input.
+
+        Args:
+            optim_ids: Tensor of shape (1, seq_length) representing the text tokens to optimize.
+            image: A tensor representing the image (raw or pre-processed) to be included.
+        
+        Returns:
+            A tensor containing the gradient in vocab space.
+        """
+        model = self.model
+        embedding_layer = self.embedding_layer
+
+        # Compute one-hot representation for the text tokens and obtain their embeddings.
+        optim_ids_onehot = torch.nn.functional.one_hot(
+            optim_ids, num_classes=embedding_layer.num_embeddings
+        )
+        optim_ids_onehot = optim_ids_onehot.to(model.device, model.dtype)
+        optim_ids_onehot.requires_grad_()
+        optim_embeds = optim_ids_onehot @ embedding_layer.weight
+   
+        pixel_values = self.normalize(image)
+
+        image_features = model.get_image_features(
+            pixel_values=pixel_values,
+            vision_feature_layer=-2,
+            vision_feature_select_strategy="default",
+        )
+        
+        # Build the input embeddings.
+        # Here we insert the image features right after the "before" embeddings.
+        input_embeds = torch.cat(
+            [
+                self.before_embeds,
+                image_features,   # Insert image features
+                optim_embeds,
+                self.after_embeds,
+                self.target_embeds,
+            ],
+            dim=1,
+        )
+        
+        # Forward pass with the combined embeddings.
+        output = model(inputs_embeds=input_embeds)
+        logits = output.logits
+
+        # Compute loss on the target tokens.
+        shift = input_embeds.shape[1] - self.target_ids.shape[1]
+        shift_logits = logits[..., shift - 1 : -1, :].contiguous()
+        shift_labels = self.target_ids
+
+        if self.config.use_mellowmax:
+            label_logits = torch.gather(
+                shift_logits, -1, shift_labels.unsqueeze(-1)
+            ).squeeze(-1)
+            loss = mellowmax(-label_logits, alpha=self.config.mellowmax_alpha, dim=-1)
         else:
-            optim_ids_onehot_grad = torch.autograd.grad(loss, optim_ids_onehot)[0]
-            return optim_ids_onehot_grad
+            loss = torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1)
+            )
+
+        optim_ids_onehot_grad, image_grads = torch.autograd.grad(loss, (optim_ids_onehot, image))
+            
+        return optim_ids_onehot_grad, image_grads
+
 
     def _compute_candidates_loss_original(
         self,
@@ -630,26 +703,19 @@ class GCG:
 
 def run(
     model: transformers.PreTrainedModel,
-    tokenizer: transformers.PreTrainedTokenizer,
+    tokenizer,
     messages: Union[str, List[dict]],
     target: str,
     config: Optional[GCGConfig] = None,
+    transform = None,
+    normalize = None,
 ) -> GCGResult:
-    """Generates a single optimized string using GCG.
-
-    Args:
-        model: The model to use for optimization.
-        tokenizer: The model's tokenizer.
-        messages: The conversation to use for optimization.
-        target: The target generation.
-        config: The GCG configuration to use.
-
-    Returns:
-        A GCGResult object that contains losses and the optimized strings.
+    """
+    Generates a single optimized string using GCG.
     """
     if config is None:
         config = GCGConfig()
     logger.setLevel(getattr(logging, config.verbosity))
-    gcg = GCG(model, tokenizer, config)
+    gcg = GCG(model, tokenizer, config, transform, normalize)
     result = gcg.run(messages, target)
     return result
