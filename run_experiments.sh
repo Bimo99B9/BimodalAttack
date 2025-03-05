@@ -1,1 +1,1 @@
-CUDA_VISIBLE_DEVICES=5 python experiments.py > experiments6.out 2>&1
+CUDA_VISIBLE_DEVICES=1 python experiments.py > experiments1.out 2>&1

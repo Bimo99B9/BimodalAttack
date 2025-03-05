@@ -72,6 +72,9 @@ class GCGConfig:
     alpha: float = 0.01
     eps: float = 0.1
     pgd_attack: bool = False
+    # New flag: if False, do not update the adversarial suffix (GCG attack)
+    gcg_attack: bool = True
+
 
 @dataclass
 class GCGResult:
@@ -115,8 +118,6 @@ class AttackBuffer:
             optim_str = optim_str.replace("\n", "\\n")
             message += f"\nloss: {loss}" + f" | string: {optim_str}"
         logger.info(message)
-        
-
 
 
 def sample_ids_from_grad(
@@ -128,7 +129,7 @@ def sample_ids_from_grad(
     not_allowed_ids: Tensor = False,
 ):
     """
-    Returns `search_width` combinations of token ids based on the token gradient.
+    Returns search_width combinations of token ids based on the token gradient.
     """
     n_optim_tokens = len(ids)
     original_ids = ids.repeat(search_width, 1)
@@ -173,7 +174,7 @@ def filter_ids(ids: Tensor, tokenizer: transformers.PreTrainedTokenizer):
     if not filtered_ids:
         raise RuntimeError(
             "No token sequences are the same after decoding and re-encoding. "
-            "Consider setting `filter_ids=False` or trying a different `optim_str_init`"
+            "Consider setting filter_ids=False or trying a different optim_str_init"
         )
 
     return torch.stack(filtered_ids)
@@ -185,8 +186,8 @@ class GCG:
         model: transformers.PreTrainedModel,
         tokenizer: transformers.PreTrainedTokenizer,
         config: GCGConfig,
-        transform = None,
-        normalize = None,
+        transform=None,
+        normalize=None,
     ):
         # If the provided tokenizer does not have attribute 'vocab_size',
         # assume it's a processor and use its underlying tokenizer.
@@ -300,21 +301,22 @@ class GCG:
         total_sampling_time = 0.0
         total_loss_time = 0.0
         total_pgd_time = 0.0
-        
-        logging.warning(f"Using alpha: {config.alpha}, eps: {config.eps}")
-        
-        
+
+        logger.warning(f"Using alpha: {config.alpha}, eps: {config.eps}")
+
         if config.pgd_attack:
             image.requires_grad = True
             image_original = image.clone()
-        
+
         for i in tqdm(range(config.num_steps)):
             iter_start = time.perf_counter()
 
             with timed_section(f"Iteration {i}: Compute token and image gradient"):
                 start_grad = time.perf_counter()
                 if config.pgd_attack:
-                    optim_ids_onehot_grad, image_grad = self.compute_gradient(optim_ids, image)
+                    optim_ids_onehot_grad, image_grad = self.compute_gradient(
+                        optim_ids, image
+                    )
                 else:
                     optim_ids_onehot_grad, _ = self.compute_gradient(optim_ids)
                 grad_time = time.perf_counter() - start_grad
@@ -323,46 +325,55 @@ class GCG:
             if config.pgd_attack:
                 with timed_section(f"Iteration {i}: PGD Update"):
                     start_pgd = time.perf_counter()
-                    
-                    # PGD Attack 
-                    # ---
-                    image = (image - config.alpha * torch.sign(image_grad)).detach().requires_grad_()
-                    image = torch.clamp(image, image_original-config.eps, image_original+config.eps)
+
+                    # PGD Attack
+                    image = (
+                        (image - config.alpha * torch.sign(image_grad))
+                        .detach()
+                        .requires_grad_()
+                    )
+                    image = torch.clamp(
+                        image, image_original - config.eps, image_original + config.eps
+                    )
                     image = torch.clamp(image, 0, 1)
-                    # ---
-                    
+
                     pgd_time = time.perf_counter() - start_pgd
                     total_pgd_time += pgd_time
                     if i % 50 == 0:
                         self._save_image(image, f"pgd_images/image_{i}.png")
-
 
             if config.dynamic_search:
                 current_search_width = max(
                     config.min_search_width,
                     int(config.search_width * (1 - i / config.num_steps)),
                 )
+                logger.info(
+                    f"[Iteration {i}] Using dynamic search width: {current_search_width}"
+                )
             else:
                 current_search_width = config.search_width
-            logger.info(
-                f"[Iteration {i}] Using dynamic search width: {current_search_width}"
-            )
 
-            with timed_section(f"Iteration {i}: Candidate sampling"):
-                start_sample = time.perf_counter()
-                sampled_ids = sample_ids_from_grad(
-                    optim_ids.squeeze(0),
-                    optim_ids_onehot_grad.squeeze(0),
-                    current_search_width,
-                    config.topk,
-                    config.n_replace,
-                    not_allowed_ids=self.not_allowed_ids,
-                )
-                if config.filter_ids:
-                    sampled_ids = filter_ids(sampled_ids, tokenizer)
-                new_search_width = sampled_ids.shape[0]
-                sampling_time = time.perf_counter() - start_sample
-                total_sampling_time += sampling_time
+            if config.gcg_attack:
+                with timed_section(f"Iteration {i}: Candidate sampling"):
+                    start_sample = time.perf_counter()
+                    sampled_ids = sample_ids_from_grad(
+                        optim_ids.squeeze(0),
+                        optim_ids_onehot_grad.squeeze(0),
+                        current_search_width,
+                        config.topk,
+                        config.n_replace,
+                        not_allowed_ids=self.not_allowed_ids,
+                    )
+                    if config.filter_ids:
+                        sampled_ids = filter_ids(sampled_ids, tokenizer)
+                    new_search_width = sampled_ids.shape[0]
+                    sampling_time = time.perf_counter() - start_sample
+                    total_sampling_time += sampling_time
+            else:
+                # When gcg_attack is deactivated, we do not update the adversarial suffix.
+                sampled_ids = optim_ids
+                new_search_width = 1
+                sampling_time = 0.0
 
             with torch.no_grad():
                 with timed_section(f"Iteration {i}: Candidate loss computation"):
@@ -372,7 +383,7 @@ class GCG:
                         if config.batch_size is None
                         else config.batch_size
                     )
-                    
+
                     if config.pgd_attack:
                         pixel_values = self.normalize(image)
                         image_features = model.get_image_features(
@@ -527,17 +538,19 @@ class GCG:
             logger.info("Initialized attack buffer.")
         return buffer
 
-    def compute_gradient(self, optim_ids: torch.Tensor, image: torch.Tensor = None) -> torch.Tensor:
+    def compute_gradient(
+        self, optim_ids: torch.Tensor, image: torch.Tensor = None
+    ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
         """
         Computes the gradient of the GCG loss with respect to the tokens,
-        incorporating an image input.
+        incorporating an image input if provided.
 
         Args:
             optim_ids: Tensor of shape (1, seq_length) representing the text tokens to optimize.
             image: A tensor representing the image (raw or pre-processed) to be included.
-        
+
         Returns:
-            A tensor containing the gradient in vocab space.
+            A tuple of (token gradient, image gradient).
         """
         model = self.model
         embedding_layer = self.embedding_layer
@@ -547,19 +560,21 @@ class GCG:
             optim_ids, num_classes=embedding_layer.num_embeddings
         )
         optim_ids_onehot = optim_ids_onehot.to(model.device, model.dtype)
-        optim_ids_onehot.requires_grad_()
+        if self.config.gcg_attack:
+            optim_ids_onehot.requires_grad_()
+        else:
+            optim_ids_onehot.requires_grad = False
+
         optim_embeds = optim_ids_onehot @ embedding_layer.weight
-   
+
         if self.config.pgd_attack:
             pixel_values = self.normalize(image)
-
             image_features = model.get_image_features(
                 pixel_values=pixel_values,
                 vision_feature_layer=-2,
                 vision_feature_select_strategy="default",
             )
-            # Build the input embeddings.
-            # Here we insert the image features right after the "before" embeddings.
+            # Build the input embeddings: image features are inserted after the before_embeds.
             input_embeds = torch.cat(
                 [
                     self.before_embeds,
@@ -580,7 +595,7 @@ class GCG:
                 ],
                 dim=1,
             )
-        
+
         # Forward pass with the combined embeddings.
         output = model(inputs_embeds=input_embeds)
         logits = output.logits
@@ -597,17 +612,24 @@ class GCG:
             loss = mellowmax(-label_logits, alpha=self.config.mellowmax_alpha, dim=-1)
         else:
             loss = torch.nn.functional.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1)
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
 
         if self.config.pgd_attack:
-            optim_ids_onehot_grad, image_grads = torch.autograd.grad(loss, (optim_ids_onehot, image))
-            return optim_ids_onehot_grad, image_grads
+            if self.config.gcg_attack:
+                optim_ids_onehot_grad, image_grad = torch.autograd.grad(
+                    loss, (optim_ids_onehot, image)
+                )
+            else:
+                image_grad = torch.autograd.grad(loss, image)[0]
+                optim_ids_onehot_grad = None
+            return optim_ids_onehot_grad, image_grad
         else:
-            optim_ids_onehot_grad = torch.autograd.grad(loss, optim_ids_onehot)[0]
+            if self.config.gcg_attack:
+                optim_ids_onehot_grad = torch.autograd.grad(loss, optim_ids_onehot)[0]
+            else:
+                optim_ids_onehot_grad = None
             return optim_ids_onehot_grad, None
-
 
     def _compute_candidates_loss_original(
         self,
@@ -669,7 +691,7 @@ class GCG:
                 gc.collect()
                 torch.cuda.empty_cache()
         return torch.cat(all_loss, dim=0)
-    
+
     def _save_image(self, image, path):
         image = image.squeeze(0).detach().cpu().numpy()
         image = image.transpose(1, 2, 0)
@@ -685,8 +707,8 @@ def run(
     target: str,
     image: Tensor = None,
     config: Optional[GCGConfig] = None,
-    transform = None,
-    normalize = None,
+    transform=None,
+    normalize=None,
 ) -> GCGResult:
     """
     Generates a single optimized string using GCG.
