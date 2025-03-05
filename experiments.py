@@ -7,6 +7,9 @@ import gc
 import logging
 import random
 import numpy as np
+import os
+import csv
+import matplotlib.pyplot as plt
 
 from transformers import AutoProcessor, LlavaForConditionalGeneration
 import torchvision.transforms as T
@@ -16,6 +19,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
+
+os.makedirs("plots_and_losses", exist_ok=True)
 
 
 def set_global_seed(seed):
@@ -61,8 +66,109 @@ raw_image = Image.open(requests.get(image_file, stream=True).raw).convert("RGB")
 image = transform(raw_image).unsqueeze(0).to(model.device)
 
 
+def plot_losses(experiment_name, seed, config, losses):
+    """
+    Plots the loss per iteration for a single run (one seed).
+    Saves the plot and a CSV file (with the same base filename) in plots_and_losses/.
+    """
+    plt.figure()
+    plt.plot(losses, linestyle="-", label=f"Seed {seed}")
+
+    plt.xlabel("Iteration")
+    plt.ylabel("Loss")
+    plt.title(f"{experiment_name} (Seed {seed})")
+
+    ax = plt.gca()
+    config_text = "\n".join(f"{k}: {v}" for k, v in config.items())
+    props = dict(boxstyle="round", facecolor="white", alpha=0.5)
+    ax.text(
+        0.02,
+        0.98,
+        config_text,
+        transform=ax.transAxes,
+        fontsize=8,
+        verticalalignment="top",
+        bbox=props,
+    )
+
+    # If you prefer to show the legend, you can do so:
+    # plt.legend()
+
+    # Save figure
+    safe_name = experiment_name.replace(" ", "_")
+    plot_filename = f"plots_and_losses/{safe_name}_seed_{seed}_losses.png"
+    plt.savefig(plot_filename, bbox_inches="tight")
+    plt.close()
+
+    # Save CSV
+    csv_filename = plot_filename.replace(".png", ".csv")
+    with open(csv_filename, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["Iteration", "Loss"])
+        for i, loss in enumerate(losses):
+            writer.writerow([i, loss])
+    logging.info(
+        f"Saved individual loss plot to {plot_filename} and CSV to {csv_filename}"
+    )
+
+
+def plot_all_losses(experiment_name, all_losses, config):
+    """
+    Plots the loss per iteration for all runs (seeds) in one combined plot,
+    and includes an average trend line.
+    Saves the combined plot and a CSV file in plots_and_losses/.
+    """
+    plt.figure()
+
+    for seed, losses in all_losses.items():
+        plt.plot(losses, linestyle="-", label=f"Seed {seed}")
+
+    if all_losses:
+        losses_list = list(all_losses.values())
+        min_len = min(len(l) for l in losses_list)
+        truncated = [arr[:min_len] for arr in losses_list]
+        avg_losses = np.mean(truncated, axis=0)
+        plt.plot(avg_losses, label="Average", linewidth=3, color="black")
+
+    plt.xlabel("Iteration")
+    plt.ylabel("Loss")
+    plt.title(f"{experiment_name} - All Seeds")
+
+    ax = plt.gca()
+    config_text = "\n".join(f"{k}: {v}" for k, v in config.items())
+    props = dict(boxstyle="round", facecolor="white", alpha=0.5)
+    ax.text(
+        0.02,
+        0.98,
+        config_text,
+        transform=ax.transAxes,
+        fontsize=8,
+        verticalalignment="top",
+        bbox=props,
+    )
+
+    plt.legend()
+
+    safe_name = experiment_name.replace(" ", "_")
+    plot_filename = f"plots_and_losses/{safe_name}_all_losses.png"
+    plt.savefig(plot_filename, bbox_inches="tight")
+    plt.close()
+
+    csv_filename = plot_filename.replace(".png", ".csv")
+    with open(csv_filename, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["Seed", "Iteration", "Loss"])
+        for seed, losses in all_losses.items():
+            for i, loss in enumerate(losses):
+                writer.writerow([seed, i, loss])
+    logging.info(
+        f"Saved combined loss plot to {plot_filename} and CSV to {csv_filename}"
+    )
+
+
 def run_experiment(name, config_kwargs, seeds):
     results = []
+    all_losses = {}
     logging.info(f"--- Starting Experiment: {name} ---")
 
     for seed in seeds:
@@ -84,18 +190,25 @@ def run_experiment(name, config_kwargs, seeds):
             )
             total_time = time.time() - start_time
             loss = result.best_loss
+
+            losses = result.losses if hasattr(result, "losses") else []
         except Exception as e:
             logging.error(f"Error during seed {seed}: {e}")
             loss = float("nan")
             total_time = 0
+            losses = []
 
         results.append({"seed": seed, "loss": loss, "time": total_time})
         logging.info(f"Seed={seed} -> Loss={loss:.4f}, Time={total_time:.2f}s")
 
+        plot_losses(name, seed, config_kwargs, losses)
+        all_losses[seed] = losses
+
+    if len(all_losses) > 1:
+        plot_all_losses(name, all_losses, config_kwargs)
+
     valid_results = [
-        r
-        for r in results
-        if not (isinstance(r["loss"], float) and r["loss"] != r["loss"])
+        r for r in results if not (isinstance(r["loss"], float) and np.isnan(r["loss"]))
     ]
     avg_loss = (
         sum(r["loss"] for r in valid_results) / len(valid_results)
@@ -116,23 +229,32 @@ def run_experiment(name, config_kwargs, seeds):
     logging.info("=" * 50)
 
 
+# Example configurations:
 base_configuration = {
     "num_steps": 250,
     "search_width": 64,
     "dynamic_search": False,
 }
 
-pgd_only_configuration = {
+pgd_only_configuration_1 = {
     "num_steps": 250,
-    "search_width": 64,
-    "dynamic_search": False,
     "pgd_attack": True,
-    "gcg_attack": False,  # adversarial suffix stays constant, not no present.
+    "gcg_attack": False,
     "alpha": 0.02,
     "eps": 0.1,
 }
 
-seeds = list(range(1, 3))
+nothing_configuration = {
+    "num_steps": 10,
+    "pgd_attack": True,
+    "gcg_attack": False,
+    "alpha": 0.02,
+    "eps": 0.1,
+}
 
-run_experiment("Base Configuration", base_configuration, seeds)
-run_experiment("PGD Only Configuration", pgd_only_configuration, seeds)
+seeds = list(range(1, 11))
+
+# Uncomment the experiments you wish to run:
+# run_experiment("Base Configuration", base_configuration, seeds)
+# run_experiment("PGD Only Configuration 1", pgd_only_configuration_1, seeds)
+run_experiment("Nothing Configuration", nothing_configuration, seeds)

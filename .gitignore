@@ -1,3 +1,4 @@
 .vscode/
 pgd_images/*
 *.out
+plots_and_losses/*
