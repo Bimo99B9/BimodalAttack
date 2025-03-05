@@ -114,16 +114,22 @@ def run_experiment(name, config_kwargs, seeds):
     logging.info("=" * 50)
 
 
-new_minimum_search_width_config_kwargs_1 = {
-    "num_steps": 2000,
-    "search_width": 24,
+base_configuration = {
+    "num_steps": 500,
+    "search_width": 256,
     "dynamic_search": False,
+}
+combined_attack_configuration = {
+    "num_steps": 500,
+    "search_width": 256,
+    "dynamic_search": False,
+    "pgd_attack": True,
     "alpha": 0.02,
     "eps": 0.1
 }
 
 seeds = list(range(1, 3))
 
-run_experiment(
-    "New minimum search width 1", new_minimum_search_width_config_kwargs_1, seeds
-)
+run_experiment("Base Configuration", base_configuration, seeds)
+run_experiment("Combined Attack Configuration", combined_attack_configuration, seeds)
+

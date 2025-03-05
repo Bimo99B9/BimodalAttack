@@ -71,6 +71,7 @@ class GCGConfig:
     min_search_width: int = 32
     alpha: float = 0.01
     eps: float = 0.1
+    pgd_attack: bool = False
 
 @dataclass
 class GCGResult:
@@ -232,7 +233,7 @@ class GCG:
         self,
         messages: Union[str, List[dict]],
         target: str,
-        image: Tensor,
+        image: Tensor = None,
     ) -> GCGResult:
         model = self.model
         tokenizer = self.tokenizer
@@ -303,32 +304,37 @@ class GCG:
         logging.warning(f"Using alpha: {config.alpha}, eps: {config.eps}")
         
         
-        image.requires_grad = True
+        if config.pgd_attack:
+            image.requires_grad = True
+            image_original = image.clone()
         
         for i in tqdm(range(config.num_steps)):
-            # image.requires_grad = True
             iter_start = time.perf_counter()
 
             with timed_section(f"Iteration {i}: Compute token and image gradient"):
                 start_grad = time.perf_counter()
-                optim_ids_onehot_grad, image_grad = self.compute_gradient(optim_ids, image)
+                if config.pgd_attack:
+                    optim_ids_onehot_grad, image_grad = self.compute_gradient(optim_ids, image)
+                else:
+                    optim_ids_onehot_grad, _ = self.compute_gradient(optim_ids)
                 grad_time = time.perf_counter() - start_grad
                 total_gradient_time += grad_time
 
-            with timed_section(f"Iteration {i}: PGD Update"):
-                start_pgd = time.perf_counter()
-                
-                # PGD Attack 
-                # ---
-                image = (image - config.alpha * torch.sign(image_grad)).detach().requires_grad_()
-                # image = torch.clamp(image, image_original-config.eps, image_original+config.eps)
-                image = torch.clamp(image, 0, 1)
-                # ---
-                
-                pgd_time = time.perf_counter() - start_pgd
-                total_pgd_time += pgd_time
-                if i % 50 == 0:
-                    self._save_image(image, f"pgd_images/image_{i}.png")
+            if config.pgd_attack:
+                with timed_section(f"Iteration {i}: PGD Update"):
+                    start_pgd = time.perf_counter()
+                    
+                    # PGD Attack 
+                    # ---
+                    image = (image - config.alpha * torch.sign(image_grad)).detach().requires_grad_()
+                    image = torch.clamp(image, image_original-config.eps, image_original+config.eps)
+                    image = torch.clamp(image, 0, 1)
+                    # ---
+                    
+                    pgd_time = time.perf_counter() - start_pgd
+                    total_pgd_time += pgd_time
+                    if i % 50 == 0:
+                        self._save_image(image, f"pgd_images/image_{i}.png")
 
 
             if config.dynamic_search:
@@ -367,23 +373,34 @@ class GCG:
                         else config.batch_size
                     )
                     
-                    pixel_values = self.normalize(image)
-                    image_features = model.get_image_features(
-                        pixel_values=pixel_values,
-                        vision_feature_layer=-2,
-                        vision_feature_select_strategy="default",
-                    )
+                    if config.pgd_attack:
+                        pixel_values = self.normalize(image)
+                        image_features = model.get_image_features(
+                            pixel_values=pixel_values,
+                            vision_feature_layer=-2,
+                            vision_feature_select_strategy="default",
+                        )
 
-                    input_embeds = torch.cat(
-                        [
-                            before_embeds.repeat(new_search_width, 1, 1),
-                            image_features.repeat(new_search_width, 1, 1),
-                            embedding_layer(sampled_ids),
-                            after_embeds.repeat(new_search_width, 1, 1),
-                            target_embeds.repeat(new_search_width, 1, 1),
-                        ],
-                        dim=1,
-                    )
+                        input_embeds = torch.cat(
+                            [
+                                before_embeds.repeat(new_search_width, 1, 1),
+                                image_features.repeat(new_search_width, 1, 1),
+                                embedding_layer(sampled_ids),
+                                after_embeds.repeat(new_search_width, 1, 1),
+                                target_embeds.repeat(new_search_width, 1, 1),
+                            ],
+                            dim=1,
+                        )
+                    else:
+                        input_embeds = torch.cat(
+                            [
+                                before_embeds.repeat(new_search_width, 1, 1),
+                                embedding_layer(sampled_ids),
+                                after_embeds.repeat(new_search_width, 1, 1),
+                                target_embeds.repeat(new_search_width, 1, 1),
+                            ],
+                            dim=1,
+                        )
 
                     loss = find_executable_batch_size(
                         self._compute_candidates_loss_original, batch_size
@@ -510,7 +527,7 @@ class GCG:
             logger.info("Initialized attack buffer.")
         return buffer
 
-    def compute_gradient(self, optim_ids: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+    def compute_gradient(self, optim_ids: torch.Tensor, image: torch.Tensor = None) -> torch.Tensor:
         """
         Computes the gradient of the GCG loss with respect to the tokens,
         incorporating an image input.
@@ -533,26 +550,36 @@ class GCG:
         optim_ids_onehot.requires_grad_()
         optim_embeds = optim_ids_onehot @ embedding_layer.weight
    
-        pixel_values = self.normalize(image)
+        if self.config.pgd_attack:
+            pixel_values = self.normalize(image)
 
-        image_features = model.get_image_features(
-            pixel_values=pixel_values,
-            vision_feature_layer=-2,
-            vision_feature_select_strategy="default",
-        )
-        
-        # Build the input embeddings.
-        # Here we insert the image features right after the "before" embeddings.
-        input_embeds = torch.cat(
-            [
-                self.before_embeds,
-                image_features,
-                optim_embeds,
-                self.after_embeds,
-                self.target_embeds,
-            ],
-            dim=1,
-        )
+            image_features = model.get_image_features(
+                pixel_values=pixel_values,
+                vision_feature_layer=-2,
+                vision_feature_select_strategy="default",
+            )
+            # Build the input embeddings.
+            # Here we insert the image features right after the "before" embeddings.
+            input_embeds = torch.cat(
+                [
+                    self.before_embeds,
+                    image_features,
+                    optim_embeds,
+                    self.after_embeds,
+                    self.target_embeds,
+                ],
+                dim=1,
+            )
+        else:
+            input_embeds = torch.cat(
+                [
+                    self.before_embeds,
+                    optim_embeds,
+                    self.after_embeds,
+                    self.target_embeds,
+                ],
+                dim=1,
+            )
         
         # Forward pass with the combined embeddings.
         output = model(inputs_embeds=input_embeds)
@@ -574,9 +601,12 @@ class GCG:
                 shift_labels.view(-1)
             )
 
-        optim_ids_onehot_grad, image_grads = torch.autograd.grad(loss, (optim_ids_onehot, image))
-            
-        return optim_ids_onehot_grad, image_grads
+        if self.config.pgd_attack:
+            optim_ids_onehot_grad, image_grads = torch.autograd.grad(loss, (optim_ids_onehot, image))
+            return optim_ids_onehot_grad, image_grads
+        else:
+            optim_ids_onehot_grad = torch.autograd.grad(loss, optim_ids_onehot)[0]
+            return optim_ids_onehot_grad, None
 
 
     def _compute_candidates_loss_original(
@@ -653,7 +683,7 @@ def run(
     tokenizer,
     messages: Union[str, List[dict]],
     target: str,
-    image: Tensor,
+    image: Tensor = None,
     config: Optional[GCGConfig] = None,
     transform = None,
     normalize = None,
