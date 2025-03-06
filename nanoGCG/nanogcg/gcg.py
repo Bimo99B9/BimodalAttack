@@ -284,6 +284,8 @@ class GCG:
                     output = model(inputs_embeds=before_embeds, use_cache=True)
                     self.prefix_cache = output.past_key_values
 
+        self.before_ids = before_ids
+        self.after_ids = after_ids
         self.target_ids = target_ids
         self.before_embeds = before_embeds
         self.after_embeds = after_embeds
@@ -384,23 +386,43 @@ class GCG:
                     )
 
                     if config.pgd_attack:
+                        # Compute image features for the current image.
                         pixel_values = self.normalize(image)
                         image_features = model.get_image_features(
                             pixel_values=pixel_values,
                             vision_feature_layer=-2,
                             vision_feature_select_strategy="default",
                         )
+                        
+                        image_features = image_features.repeat(new_search_width, 1, 1)
 
-                        input_embeds = torch.cat(
+                        n_image_tokens = image_features.shape[1]
+                        image_token_ids = torch.full(
+                            (1, n_image_tokens),
+                            self.model.config.image_token_index,
+                            device=model.device,
+                            dtype=torch.long,
+                        )
+                        full_ids = torch.cat(
                             [
-                                before_embeds.repeat(new_search_width, 1, 1),
-                                image_features.repeat(new_search_width, 1, 1),
-                                embedding_layer(sampled_ids),
-                                after_embeds.repeat(new_search_width, 1, 1),
-                                target_embeds.repeat(new_search_width, 1, 1),
+                                self.before_ids.repeat(new_search_width, 1),
+                                image_token_ids.repeat(new_search_width, 1),
+                                sampled_ids,
+                                self.after_ids.repeat(new_search_width, 1),
+                                self.target_ids.repeat(new_search_width, 1),
                             ],
                             dim=1,
                         )
+                        # Obtain input embeddings from the embedding layer.
+                        input_embeds = embedding_layer(full_ids)
+                        # Create a mask identifying positions of the special image token.
+                        special_image_mask = (full_ids == self.model.config.image_token_index).unsqueeze(-1)
+                        special_image_mask = special_image_mask.expand_as(input_embeds).to(input_embeds.device)
+                        # Ensure that the number of tokens matches the number of image features.
+                        if input_embeds[special_image_mask].numel() != image_features.numel():
+                            raise ValueError("Mismatch between image tokens and image features")
+                        image_features = image_features.to(input_embeds.dtype)
+                        input_embeds = input_embeds.masked_scatter(special_image_mask, image_features)
                     else:
                         input_embeds = torch.cat(
                             [
@@ -574,17 +596,16 @@ class GCG:
                 vision_feature_layer=-2,
                 vision_feature_select_strategy="default",
             )
-            # Build the input embeddings: image features are inserted after the before_embeds.
-            input_embeds = torch.cat(
-                [
-                    self.before_embeds,
-                    image_features,
-                    optim_embeds,
-                    self.after_embeds,
-                    self.target_embeds,
-                ],
-                dim=1,
-            )
+            n_image_tokens = image_features.shape[1]
+            image_token_ids = torch.full((1, n_image_tokens), self.model.config.image_token_index, device=model.device, dtype=torch.long)
+            full_ids = torch.cat([self.before_ids, image_token_ids, optim_ids, self.after_ids, self.target_ids], dim=1)
+            input_embeds = embedding_layer(full_ids)
+            special_image_mask = (full_ids == self.model.config.image_token_index).unsqueeze(-1)
+            special_image_mask = special_image_mask.expand_as(input_embeds).to(input_embeds.device)
+            if input_embeds[special_image_mask].numel() != image_features.numel():
+                raise ValueError("Mismatch between image tokens and image features")
+            image_features = image_features.to(input_embeds.dtype)
+            input_embeds = input_embeds.masked_scatter(special_image_mask, image_features)
         else:
             input_embeds = torch.cat(
                 [

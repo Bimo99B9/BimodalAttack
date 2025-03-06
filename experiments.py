@@ -240,7 +240,7 @@ base_configuration = {
 }
 
 pgd_only_configuration_1 = {
-    "num_steps": 1000,
+    "num_steps": 500,
     "pgd_attack": True,
     "gcg_attack": False,
     "alpha": 0.01,
@@ -267,5 +267,5 @@ seeds = list(range(1, 2))
 # Uncomment the experiments you wish to run:
 # run_experiment("Base Configuration", base_configuration, seeds)
 # run_experiment("GCG Only Configuration", gcg_only_configuration, seeds)
-run_experiment("PGD Only Configuration FixAttempt2", pgd_only_configuration_1, seeds)
+run_experiment("PGD Only Configuration 2", pgd_only_configuration_1, seeds)
 # run_experiment("Nothing Configuration", nothing_configuration, seeds)
