@@ -72,7 +72,6 @@ class GCGConfig:
     alpha: float = 0.01
     eps: float = 0.1
     pgd_attack: bool = False
-    # New flag: if False, do not update the adversarial suffix (GCG attack)
     gcg_attack: bool = True
 
 
@@ -328,7 +327,7 @@ class GCG:
 
                     # PGD Attack
                     image = (
-                        (image - config.alpha * torch.sign(image_grad))
+                        (image - config.alpha * config.eps * torch.sign(image_grad))
                         .detach()
                         .requires_grad_()
                     )
@@ -417,6 +416,7 @@ class GCG:
                         self._compute_candidates_loss_original, batch_size
                     )(input_embeds)
                     current_loss = loss.min().item()
+                    logger.info(f"[Iteration {i}] Current loss: {current_loss:.4f}")
                     optim_ids = sampled_ids[loss.argmin()].unsqueeze(0)
                     loss_time = time.perf_counter() - start_loss
                     total_loss_time += loss_time
