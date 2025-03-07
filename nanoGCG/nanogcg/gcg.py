@@ -22,7 +22,6 @@ from nanogcg.utils import (
     configure_pad_token,
     find_executable_batch_size,
     get_nonascii_toks,
-    mellowmax,
 )
 
 import requests
@@ -58,8 +57,6 @@ class GCGConfig:
     topk: int = 256
     n_replace: int = 1
     buffer_size: int = 0
-    use_mellowmax: bool = False
-    mellowmax_alpha: float = 1.0
     early_stop: bool = False
     use_prefix_cache: bool = True
     allow_non_ascii: bool = False
@@ -473,7 +470,8 @@ class GCG:
         logger.warning(
             f"Average candidate loss computation time: {total_loss_time / num_iters:.4f}s"
         )
-
+        
+        self._save_image(image, f"pgd_images/image_{i}.png")
         min_loss_index = losses.index(min(losses))
         result = GCGResult(
             best_loss=losses[min_loss_index],
@@ -626,15 +624,9 @@ class GCG:
         shift_logits = logits[..., shift - 1 : -1, :].contiguous()
         shift_labels = self.target_ids
 
-        if self.config.use_mellowmax:
-            label_logits = torch.gather(
-                shift_logits, -1, shift_labels.unsqueeze(-1)
-            ).squeeze(-1)
-            loss = mellowmax(-label_logits, alpha=self.config.mellowmax_alpha, dim=-1)
-        else:
-            loss = torch.nn.functional.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
-            )
+        loss = torch.nn.functional.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+        )
 
         if self.config.pgd_attack:
             if self.config.gcg_attack:
@@ -686,19 +678,12 @@ class GCG:
                 tmp = input_embeds.shape[1] - self.target_ids.shape[1]
                 shift_logits = logits[..., tmp - 1 : -1, :].contiguous()
                 shift_labels = self.target_ids.repeat(current_batch_size, 1)
-                if self.config.use_mellowmax:
-                    label_logits = torch.gather(
-                        shift_logits, -1, shift_labels.unsqueeze(-1)
-                    ).squeeze(-1)
-                    loss = mellowmax(
-                        -label_logits, alpha=self.config.mellowmax_alpha, dim=-1
-                    )
-                else:
-                    loss = torch.nn.functional.cross_entropy(
-                        shift_logits.view(-1, shift_logits.size(-1)),
-                        shift_labels.view(-1),
-                        reduction="none",
-                    )
+
+                loss = torch.nn.functional.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    reduction="none",
+                )
                 loss = loss.view(current_batch_size, -1).mean(dim=-1)
                 all_loss.append(loss)
                 if self.config.early_stop:
