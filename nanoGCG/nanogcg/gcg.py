@@ -22,6 +22,7 @@ from nanogcg.utils import (
     configure_pad_token,
     find_executable_batch_size,
     get_nonascii_toks,
+    mellowmax,
 )
 
 import requests
@@ -57,6 +58,8 @@ class GCGConfig:
     topk: int = 256
     n_replace: int = 1
     buffer_size: int = 0
+    use_mellowmax: bool = False
+    mellowmax_alpha: float = 1.0
     early_stop: bool = False
     use_prefix_cache: bool = True
     allow_non_ascii: bool = False
@@ -181,14 +184,14 @@ class GCG:
         self,
         model: transformers.PreTrainedModel,
         tokenizer: transformers.PreTrainedTokenizer,
+        processor,  # processor is passed in to build the prompt
         config: GCGConfig,
         transform=None,
         normalize=None,
     ):
-        # If the provided tokenizer does not have attribute 'vocab_size',
-        # assume it's a processor and use its underlying tokenizer.
         self.model = model
         self.tokenizer = tokenizer
+        self.processor = processor
         self.config = config
         self.transform = transform
         self.normalize = normalize
@@ -222,9 +225,7 @@ class GCG:
             logger.warning(
                 "Tokenizer does not have a chat template. Assuming base model and setting chat template to empty."
             )
-            tokenizer.chat_template = (
-                "{% for message in messages %}{{ message['content'] }}{% endfor %}"
-            )
+            tokenizer.chat_template = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
 
     def run(
         self,
@@ -240,34 +241,39 @@ class GCG:
             set_seed(config.seed)
             torch.use_deterministic_algorithms(True, warn_only=True)
 
-        if isinstance(messages, str):
-            messages = [{"role": "user", "content": messages}]
-        else:
-            messages = copy.deepcopy(messages)
-
-        if not any(["{optim_str}" in d["content"] for d in messages]):
-            messages[-1]["content"] = messages[-1]["content"] + "{optim_str}"
-
         with timed_section("Chat template and tokenization setup"):
-            template = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            if tokenizer.bos_token and template.startswith(tokenizer.bos_token):
-                template = template.replace(tokenizer.bos_token, "")
-            before_str, after_str = template.split("{optim_str}")
+            if isinstance(messages, str):
+                messages = [{"role": "user", "content": messages}]
+            # Append the {optim_str} placeholder if not already present.
+            if isinstance(messages[-1]["content"], str) and "{optim_str}" not in messages[-1]["content"]:
+                messages[-1]["content"] = messages[-1]["content"] + " {optim_str}"
+            # If an image is provided, modify the last message to include an image element.
+            if image is not None:
+                if isinstance(messages[-1]["content"], str):
+                    messages[-1]["content"] = [
+                        {"type": "text", "text": messages[-1]["content"]},
+                        {"type": "image"}
+                    ]
+                elif isinstance(messages[-1]["content"], list):
+                    if not any(item.get("type") == "image" for item in messages[-1]["content"]):
+                        messages[-1]["content"].append({"type": "image"})
 
-        target = " " + target if config.add_space_before_target else target
+            messages.append({"role": "assistant", "content": target})
 
-        with timed_section("Tokenization of before, after, and target"):
-            before_ids = tokenizer([before_str], padding=False, return_tensors="pt")[
-                "input_ids"
-            ].to(model.device, torch.int64)
-            after_ids = tokenizer(
-                [after_str], add_special_tokens=False, return_tensors="pt"
-            )["input_ids"].to(model.device, torch.int64)
-            target_ids = tokenizer(
-                [target], add_special_tokens=False, return_tensors="pt"
-            )["input_ids"].to(model.device, torch.int64)
+            prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+            if tokenizer.bos_token and prompt.startswith(tokenizer.bos_token):
+                prompt = prompt.replace(tokenizer.bos_token, "")
+
+            logging.info(f"Prompt after applying chat template: {prompt}")
+
+            before_str, after_str = prompt.split("{optim_str}")
+            
+            logging.info(f"Before: {before_str}")
+            logging.info(f"After: {after_str}")
+
+            before_ids = tokenizer(before_str, padding=False, return_tensors="pt")["input_ids"].to(model.device, torch.int64)
+            after_ids = tokenizer(after_str, add_special_tokens=False, return_tensors="pt")["input_ids"].to(model.device, torch.int64)
+            target_ids = tokenizer(target, add_special_tokens=False, return_tensors="pt")["input_ids"].to(model.device, torch.int64)
 
         embedding_layer = self.embedding_layer
         with timed_section("Embedding for before, after, and target"):
@@ -281,8 +287,6 @@ class GCG:
                     output = model(inputs_embeds=before_embeds, use_cache=True)
                     self.prefix_cache = output.past_key_values
 
-        self.before_ids = before_ids
-        self.after_ids = after_ids
         self.target_ids = target_ids
         self.before_embeds = before_embeds
         self.after_embeds = after_embeds
@@ -324,7 +328,7 @@ class GCG:
                 with timed_section(f"Iteration {i}: PGD Update"):
                     start_pgd = time.perf_counter()
 
-                    # PGD Attack
+                    # PGD Attack update
                     image = (
                         (image - config.alpha * config.eps * torch.sign(image_grad))
                         .detach()
@@ -368,7 +372,6 @@ class GCG:
                     sampling_time = time.perf_counter() - start_sample
                     total_sampling_time += sampling_time
             else:
-                # When gcg_attack is deactivated, we do not update the adversarial suffix.
                 sampled_ids = optim_ids
                 new_search_width = 1
                 sampling_time = 0.0
@@ -383,43 +386,23 @@ class GCG:
                     )
 
                     if config.pgd_attack:
-                        # Compute image features for the current image.
                         pixel_values = self.normalize(image)
                         image_features = model.get_image_features(
                             pixel_values=pixel_values,
                             vision_feature_layer=-2,
                             vision_feature_select_strategy="default",
                         )
-                        
-                        image_features = image_features.repeat(new_search_width, 1, 1)
 
-                        n_image_tokens = image_features.shape[1]
-                        image_token_ids = torch.full(
-                            (1, n_image_tokens),
-                            self.model.config.image_token_index,
-                            device=model.device,
-                            dtype=torch.long,
-                        )
-                        full_ids = torch.cat(
+                        input_embeds = torch.cat(
                             [
-                                self.before_ids.repeat(new_search_width, 1),
-                                image_token_ids.repeat(new_search_width, 1),
-                                sampled_ids,
-                                self.after_ids.repeat(new_search_width, 1),
-                                self.target_ids.repeat(new_search_width, 1),
+                                before_embeds.repeat(new_search_width, 1, 1),
+                                image_features.repeat(new_search_width, 1, 1),
+                                embedding_layer(sampled_ids),
+                                after_embeds.repeat(new_search_width, 1, 1),
+                                target_embeds.repeat(new_search_width, 1, 1),
                             ],
                             dim=1,
                         )
-                        # Obtain input embeddings from the embedding layer.
-                        input_embeds = embedding_layer(full_ids)
-                        # Create a mask identifying positions of the special image token.
-                        special_image_mask = (full_ids == self.model.config.image_token_index).unsqueeze(-1)
-                        special_image_mask = special_image_mask.expand_as(input_embeds).to(input_embeds.device)
-                        # Ensure that the number of tokens matches the number of image features.
-                        if input_embeds[special_image_mask].numel() != image_features.numel():
-                            raise ValueError("Mismatch between image tokens and image features")
-                        image_features = image_features.to(input_embeds.dtype)
-                        input_embeds = input_embeds.masked_scatter(special_image_mask, image_features)
                     else:
                         input_embeds = torch.cat(
                             [
@@ -594,16 +577,16 @@ class GCG:
                 vision_feature_layer=-2,
                 vision_feature_select_strategy="default",
             )
-            n_image_tokens = image_features.shape[1]
-            image_token_ids = torch.full((1, n_image_tokens), self.model.config.image_token_index, device=model.device, dtype=torch.long)
-            full_ids = torch.cat([self.before_ids, image_token_ids, optim_ids, self.after_ids, self.target_ids], dim=1)
-            input_embeds = embedding_layer(full_ids)
-            special_image_mask = (full_ids == self.model.config.image_token_index).unsqueeze(-1)
-            special_image_mask = special_image_mask.expand_as(input_embeds).to(input_embeds.device)
-            if input_embeds[special_image_mask].numel() != image_features.numel():
-                raise ValueError("Mismatch between image tokens and image features")
-            image_features = image_features.to(input_embeds.dtype)
-            input_embeds = input_embeds.masked_scatter(special_image_mask, image_features)
+            input_embeds = torch.cat(
+                [
+                    self.before_embeds,
+                    image_features,
+                    optim_embeds,
+                    self.after_embeds,
+                    self.target_embeds,
+                ],
+                dim=1,
+            )
         else:
             input_embeds = torch.cat(
                 [
@@ -709,6 +692,7 @@ class GCG:
 def run(
     model: transformers.PreTrainedModel,
     tokenizer,
+    processor,
     messages: Union[str, List[dict]],
     target: str,
     image: Tensor = None,
@@ -722,6 +706,6 @@ def run(
     if config is None:
         config = GCGConfig()
     logger.setLevel(getattr(logging, config.verbosity))
-    gcg = GCG(model, tokenizer, config, transform, normalize)
+    gcg = GCG(model, tokenizer, processor, config, transform, normalize)
     result = gcg.run(messages, target, image)
     return result

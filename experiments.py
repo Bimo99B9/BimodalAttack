@@ -178,12 +178,13 @@ def run_experiment(name, config_kwargs, seeds):
         torch.cuda.empty_cache()
         gc.collect()
         set_global_seed(seed)
-        config = GCGConfig(**config_kwargs, seed=seed, verbosity="INFO")
+        config = GCGConfig(**config_kwargs, seed=seed, verbosity="DEBUG")
         try:
             start_time = time.time()
             result = nanogcg.run(
                 model,
                 tokenizer,
+                processor,
                 message,
                 target,
                 image,
@@ -240,11 +241,11 @@ base_configuration = {
 }
 
 pgd_only_configuration_1 = {
-    "num_steps": 500,
+    "num_steps": 5000,
     "pgd_attack": True,
     "gcg_attack": False,
-    "alpha": 0.01,
-    "eps": 32/255,
+    "alpha": 1/255,
+    "eps": 64/255,
 }
 
 gcg_only_configuration = {
