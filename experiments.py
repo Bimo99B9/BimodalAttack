@@ -243,16 +243,33 @@ def run_experiment(name, config_kwargs, seeds):
 # Example configurations:
 base_configuration = {
     "num_steps": 250,
-    "search_width": 64,
+    "search_width": 128,
     "dynamic_search": False,
-}
-
-pgd_only_configuration_1 = {
-    "num_steps": 200,
     "pgd_attack": True,
-    "gcg_attack": False,
+    "gcg_attack": True,
     "alpha": 1 / 255,
     "eps": 64 / 255,
+    "debug_output": False,
+}
+
+dynamic_search_configuration = {
+    "num_steps": 250,
+    "search_width": 128,
+    "dynamic_search": True,
+    "min_search_width": 32,
+    "pgd_attack": True,
+    "gcg_attack": True,
+    "alpha": 1 / 255,
+    "eps": 64 / 255,
+    "debug_output": False,
+}
+
+pgd_only_configuration = {
+    "num_steps": 500,
+    "pgd_attack": True,
+    "gcg_attack": False,
+    "alpha": 2 / 255,
+    "eps": 96 / 255,
 }
 
 gcg_only_configuration = {
@@ -262,18 +279,10 @@ gcg_only_configuration = {
     "gcg_attack": True,
 }
 
-nothing_configuration = {
-    "num_steps": 10,
-    "pgd_attack": True,
-    "gcg_attack": False,
-    "alpha": 0.02,
-    "eps": 0.1,
-}
-
 seeds = list(range(1, 2))
 
 # Uncomment the experiments you wish to run:
+# run_experiment("Dynamic Search Configuration", dynamic_search_configuration, seeds)
 # run_experiment("Base Configuration", base_configuration, seeds)
 # run_experiment("GCG Only Configuration", gcg_only_configuration, seeds)
-run_experiment("PGD Only Configuration 2", pgd_only_configuration_1, seeds)
-# run_experiment("Nothing Configuration", nothing_configuration, seeds)
+run_experiment("PGD Only Configuration", pgd_only_configuration, seeds)

@@ -73,6 +73,7 @@ class GCGConfig:
     eps: float = 0.1
     pgd_attack: bool = False
     gcg_attack: bool = True
+    debug_output: bool = False
 
 
 @dataclass
@@ -518,10 +519,12 @@ class GCG:
             optim_str = tokenizer.batch_decode(optim_ids)[0]
             optim_strings.append(optim_str)
 
-            if i % 10 == 0:
+            if i % 10 == 0 and config.debug_output:
                 current_image_id = f"pgd_images/image_{i}.png"
 
                 if config.pgd_attack:
+                    self._save_image(image, current_image_id)
+                    
                     pixel_values = self.normalize(image)
                     image_features = model.get_image_features(
                         pixel_values=pixel_values,
