@@ -39,6 +39,7 @@ if not logger.hasHandlers():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+logger.propagate = False
 
 
 @contextmanager
@@ -61,7 +62,6 @@ class GCGConfig:
     use_mellowmax: bool = False
     mellowmax_alpha: float = 1.0
     early_stop: bool = False
-    use_prefix_cache: bool = True
     allow_non_ascii: bool = False
     filter_ids: bool = True
     add_space_before_target: bool = False
@@ -81,6 +81,9 @@ class GCGResult:
     best_string: str
     losses: List[float]
     strings: List[str]
+    adversarial_suffixes: List[str]
+    image_ids: List[str]
+    model_outputs: List[str]
 
 
 class AttackBuffer:
@@ -202,8 +205,6 @@ class GCG:
             if config.allow_non_ascii
             else get_nonascii_toks(tokenizer, device=model.device)
         )
-        self.prefix_cache = None
-        self.draft_prefix_cache = None
 
         self.stop_flag = False
 
@@ -222,10 +223,24 @@ class GCG:
             )
 
         if not hasattr(tokenizer, "chat_template") or not tokenizer.chat_template:
-            logger.warning(
-                "Tokenizer does not have a chat template. Assuming base model and setting chat template to empty."
-            )
-            tokenizer.chat_template = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+            if config.pgd_attack:
+                logger.warning(
+                    "Tokenizer does not have a chat template. Using custom chat template for GCG+PGD attack."
+                )
+                tokenizer.chat_template = (
+                    "USER: <image>\n"
+                    "{{ messages[0]['content'][0]['text'] }} \n"
+                    "ASSISTANT: "
+                )
+                self.processor.chat_template = tokenizer.chat_template
+            else:
+                logger.warning(
+                    "Tokenizer does not have a chat template. Using custom chat template for GCG only attack."
+                )
+                tokenizer.chat_template = (
+                    "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+                )
+                self.processor.chat_template = tokenizer.chat_template
 
     def run(
         self,
@@ -241,59 +256,127 @@ class GCG:
             set_seed(config.seed)
             torch.use_deterministic_algorithms(True, warn_only=True)
 
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
+        else:
+            messages = copy.deepcopy(messages)
+
+        logger.info(f"Messages 0: {messages}")
+
         with timed_section("Chat template and tokenization setup"):
             if isinstance(messages, str):
                 messages = [{"role": "user", "content": messages}]
+            else:
+                messages = copy.deepcopy(messages)
+
+                logger.info(f"Messages 1: {messages}")
+
             # Append the {optim_str} placeholder if not already present.
-            if isinstance(messages[-1]["content"], str) and "{optim_str}" not in messages[-1]["content"]:
+            if (
+                isinstance(messages[-1]["content"], str)
+                and "{optim_str}" not in messages[-1]["content"]
+            ):
                 messages[-1]["content"] = messages[-1]["content"] + " {optim_str}"
-            # If an image is provided, modify the last message to include an image element.
-            if image is not None:
+                logger.info(f"Messages 2: {messages}")
+
+            # For PGD attack, convert the user message to a list with text and image elements.
+            if config.pgd_attack:
                 if isinstance(messages[-1]["content"], str):
                     messages[-1]["content"] = [
                         {"type": "text", "text": messages[-1]["content"]},
-                        {"type": "image"}
+                        {"type": "image"},
                     ]
+                    logger.info(f"Messages 3: {messages}")
                 elif isinstance(messages[-1]["content"], list):
-                    if not any(item.get("type") == "image" for item in messages[-1]["content"]):
+                    if not any(
+                        item.get("type") == "image" for item in messages[-1]["content"]
+                    ):
                         messages[-1]["content"].append({"type": "image"})
+            logger.info(f"Messages 4: {messages}")
 
-            messages.append({"role": "assistant", "content": target})
+            # Apply the chat template.
+            prompt = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True
+            )
+            logger.info(f"Prompt after applying chat template from messages: {prompt}")
 
-            prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+            # Remove BOS token if present.
             if tokenizer.bos_token and prompt.startswith(tokenizer.bos_token):
                 prompt = prompt.replace(tokenizer.bos_token, "")
+            logger.info(f"Prompt after removing BOS token: {prompt}")
 
-            logging.info(f"Prompt after applying chat template: {prompt}")
+            if config.pgd_attack:
+                before_img_str, after_img_str = prompt.split("<image>")
 
-            before_str, after_str = prompt.split("{optim_str}")
-            
-            logging.info(f"Before: {before_str}")
-            logging.info(f"After: {after_str}")
+                before_suffix_str, after_str = after_img_str.split("{optim_str}")
 
-            before_ids = tokenizer(before_str, padding=False, return_tensors="pt")["input_ids"].to(model.device, torch.int64)
-            after_ids = tokenizer(after_str, add_special_tokens=False, return_tensors="pt")["input_ids"].to(model.device, torch.int64)
-            target_ids = tokenizer(target, add_special_tokens=False, return_tensors="pt")["input_ids"].to(model.device, torch.int64)
+                logger.info(f"Before image str: {before_img_str}")
+                logger.info(f"Before suffix str: {before_suffix_str}")
+                logger.info(f"After str: {after_str}")
+                logger.info(f"Target: {target}")
+
+                before_img_ids = tokenizer(
+                    before_img_str, padding=False, return_tensors="pt"
+                )["input_ids"].to(model.device, torch.int64)
+                before_suffix_ids = tokenizer(
+                    before_suffix_str, padding=False, return_tensors="pt"
+                )["input_ids"].to(model.device, torch.int64)
+                after_ids = tokenizer(
+                    after_str, add_special_tokens=False, return_tensors="pt"
+                )["input_ids"].to(model.device, torch.int64)
+                target_ids = tokenizer(
+                    target, add_special_tokens=False, return_tensors="pt"
+                )["input_ids"].to(model.device, torch.int64)
+            else:
+                before_str, after_str = prompt.split("{optim_str}")
+                logger.info(f"Before str: {before_str}")
+                logger.info(f"After str: {after_str}")
+                logger.info(f"Target: {target}")
+
+                before_ids = tokenizer(before_str, padding=False, return_tensors="pt")[
+                    "input_ids"
+                ].to(model.device, torch.int64)
+                after_ids = tokenizer(
+                    after_str, add_special_tokens=False, return_tensors="pt"
+                )["input_ids"].to(model.device, torch.int64)
+                target_ids = tokenizer(
+                    target, add_special_tokens=False, return_tensors="pt"
+                )["input_ids"].to(model.device, torch.int64)
 
         embedding_layer = self.embedding_layer
         with timed_section("Embedding for before, after, and target"):
-            before_embeds, after_embeds, target_embeds = [
-                embedding_layer(ids) for ids in (before_ids, after_ids, target_ids)
-            ]
+            if config.pgd_attack:
+                before_img_embeds, before_suffix_embeds, after_embeds, target_embeds = [
+                    embedding_layer(ids)
+                    for ids in (
+                        before_img_ids,
+                        before_suffix_ids,
+                        after_ids,
+                        target_ids,
+                    )
+                ]
+                self.before_img_ids = before_img_ids
+                self.before_suffix_ids = before_suffix_ids
+                self.after_ids = after_ids
+                self.target_ids = target_ids
+                self.before_img_embeds = before_img_embeds
+                self.before_suffix_embeds = before_suffix_embeds
+                self.after_embeds = after_embeds
+                self.target_embeds = target_embeds
 
-        if config.use_prefix_cache:
-            with torch.no_grad():
-                with timed_section("Prefix cache computation"):
-                    output = model(inputs_embeds=before_embeds, use_cache=True)
-                    self.prefix_cache = output.past_key_values
+            else:
+                before_embeds, after_embeds, target_embeds = [
+                    embedding_layer(ids) for ids in (before_ids, after_ids, target_ids)
+                ]
 
-        self.target_ids = target_ids
-        self.before_embeds = before_embeds
-        self.after_embeds = after_embeds
-        self.target_embeds = target_embeds
+                self.target_ids = target_ids
+                self.before_embeds = before_embeds
+                self.after_embeds = after_embeds
+                self.target_embeds = target_embeds
 
         with timed_section("Attack buffer initialization"):
-            buffer = self.init_buffer()
+            buffer = self.init_buffer(image)
+
         optim_ids = buffer.get_best_ids()
 
         losses = []
@@ -304,11 +387,14 @@ class GCG:
         total_loss_time = 0.0
         total_pgd_time = 0.0
 
-        logger.warning(f"Using alpha: {config.alpha}, eps: {config.eps}")
-
         if config.pgd_attack:
+            logger.warning(f"Using alpha: {config.alpha}, eps: {config.eps}")
             image.requires_grad = True
             image_original = image.clone()
+
+        adv_suffixes = []
+        image_ids = []
+        model_outputs = []
 
         for i in tqdm(range(config.num_steps)):
             iter_start = time.perf_counter()
@@ -341,8 +427,6 @@ class GCG:
 
                     pgd_time = time.perf_counter() - start_pgd
                     total_pgd_time += pgd_time
-                    if i % 50 == 0:
-                        self._save_image(image, f"pgd_images/image_{i}.png")
 
             if config.dynamic_search:
                 current_search_width = max(
@@ -395,21 +479,24 @@ class GCG:
 
                         input_embeds = torch.cat(
                             [
-                                before_embeds.repeat(new_search_width, 1, 1),
+                                self.before_img_embeds.repeat(new_search_width, 1, 1),
                                 image_features.repeat(new_search_width, 1, 1),
+                                self.before_suffix_embeds.repeat(
+                                    new_search_width, 1, 1
+                                ),
                                 embedding_layer(sampled_ids),
-                                after_embeds.repeat(new_search_width, 1, 1),
-                                target_embeds.repeat(new_search_width, 1, 1),
+                                self.after_embeds.repeat(new_search_width, 1, 1),
+                                self.target_embeds.repeat(new_search_width, 1, 1),
                             ],
                             dim=1,
                         )
                     else:
                         input_embeds = torch.cat(
                             [
-                                before_embeds.repeat(new_search_width, 1, 1),
+                                self.before_embeds.repeat(new_search_width, 1, 1),
                                 embedding_layer(sampled_ids),
-                                after_embeds.repeat(new_search_width, 1, 1),
-                                target_embeds.repeat(new_search_width, 1, 1),
+                                self.after_embeds.repeat(new_search_width, 1, 1),
+                                self.target_embeds.repeat(new_search_width, 1, 1),
                             ],
                             dim=1,
                         )
@@ -430,6 +517,57 @@ class GCG:
             optim_ids = buffer.get_best_ids()
             optim_str = tokenizer.batch_decode(optim_ids)[0]
             optim_strings.append(optim_str)
+
+            if i % 10 == 0:
+                current_image_id = f"pgd_images/image_{i}.png"
+
+                if config.pgd_attack:
+                    pixel_values = self.normalize(image)
+                    image_features = model.get_image_features(
+                        pixel_values=pixel_values,
+                        vision_feature_layer=-2,
+                        vision_feature_select_strategy="default",
+                    )
+
+                    input_embeds = torch.cat(
+                        [
+                            self.before_img_embeds.repeat(new_search_width, 1, 1),
+                            image_features.repeat(new_search_width, 1, 1),
+                            self.before_suffix_embeds.repeat(new_search_width, 1, 1),
+                            embedding_layer(sampled_ids),
+                            self.after_embeds.repeat(new_search_width, 1, 1),
+                            # self.target_embeds.repeat(new_search_width, 1, 1), # Do not include target embeddings in the output
+                        ],
+                        dim=1,
+                    )
+                else:
+                    input_embeds = torch.cat(
+                        [
+                            self.before_embeds.repeat(new_search_width, 1, 1),
+                            embedding_layer(sampled_ids),
+                            self.after_embeds.repeat(new_search_width, 1, 1),
+                        ],
+                        dim=1,
+                    )
+
+                generated_ids = model.generate(
+                    inputs_embeds=input_embeds, max_new_tokens=150
+                )
+
+                gen_output = tokenizer.decode(
+                    generated_ids[0], skip_special_tokens=True
+                )
+                logger.info(
+                    f"Output generated by the model at iteration {i} is: {gen_output}"
+                )
+            else:
+                current_image_id = ""
+                gen_output = ""
+
+            # Append details for this iteration.
+            adv_suffixes.append(optim_str)
+            image_ids.append(current_image_id)
+            model_outputs.append(gen_output)
 
             buffer.log_buffer(tokenizer)
 
@@ -453,7 +591,7 @@ class GCG:
         logger.warning(
             f"Average candidate loss computation time: {total_loss_time / num_iters:.4f}s"
         )
-        
+
         self._save_image(image, f"pgd_images/image_{i}.png")
         min_loss_index = losses.index(min(losses))
         result = GCGResult(
@@ -461,11 +599,13 @@ class GCG:
             best_string=optim_strings[min_loss_index],
             losses=losses,
             strings=optim_strings,
+            adversarial_suffixes=adv_suffixes,
+            image_ids=image_ids,
+            model_outputs=model_outputs,
         )
-
         return result
 
-    def init_buffer(self) -> AttackBuffer:
+    def init_buffer(self, image) -> AttackBuffer:
         model = self.model
         tokenizer = self.tokenizer
         config = self.config
@@ -512,9 +652,19 @@ class GCG:
                     )
 
             true_buffer_size = max(1, config.buffer_size)
-            if self.prefix_cache:
+
+            if config.pgd_attack:
+                pixel_values = self.normalize(image)
+                image_features = model.get_image_features(
+                    pixel_values=pixel_values,
+                    vision_feature_layer=-2,
+                    vision_feature_select_strategy="default",
+                )
                 init_buffer_embeds = torch.cat(
                     [
+                        self.before_img_embeds.repeat(true_buffer_size, 1, 1),
+                        image_features.repeat(true_buffer_size, 1, 1),
+                        self.before_suffix_embeds.repeat(true_buffer_size, 1, 1),
                         self.embedding_layer(init_buffer_ids),
                         self.after_embeds.repeat(true_buffer_size, 1, 1),
                         self.target_embeds.repeat(true_buffer_size, 1, 1),
@@ -577,10 +727,21 @@ class GCG:
                 vision_feature_layer=-2,
                 vision_feature_select_strategy="default",
             )
+            # input_embeds = torch.cat(
+            #     [
+            #         self.before_embeds,
+            #         image_features,
+            #         optim_embeds,
+            #         self.after_embeds,
+            #         self.target_embeds,
+            #     ],
+            #     dim=1,
+            # ) # Example left as reference of what was done before
             input_embeds = torch.cat(
                 [
-                    self.before_embeds,
+                    self.before_img_embeds,
                     image_features,
+                    self.before_suffix_embeds,
                     optim_embeds,
                     self.after_embeds,
                     self.target_embeds,
@@ -633,30 +794,12 @@ class GCG:
         input_embeds: Tensor,
     ) -> Tensor:
         all_loss = []
-        prefix_cache_batch = []
         for i in range(0, input_embeds.shape[0], search_batch_size):
             with torch.no_grad():
                 input_embeds_batch = input_embeds[i : i + search_batch_size]
                 current_batch_size = input_embeds_batch.shape[0]
-                if self.prefix_cache:
-                    if (
-                        not prefix_cache_batch
-                        or current_batch_size != search_batch_size
-                    ):
-                        prefix_cache_batch = [
-                            [
-                                x.expand(current_batch_size, -1, -1, -1)
-                                for x in self.prefix_cache[i]
-                            ]
-                            for i in range(len(self.prefix_cache))
-                        ]
-                    outputs = self.model(
-                        inputs_embeds=input_embeds_batch,
-                        past_key_values=prefix_cache_batch,
-                        use_cache=True,
-                    )
-                else:
-                    outputs = self.model(inputs_embeds=input_embeds_batch)
+
+                outputs = self.model(inputs_embeds=input_embeds_batch)
                 logits = outputs.logits
                 tmp = input_embeds.shape[1] - self.target_ids.shape[1]
                 shift_logits = logits[..., tmp - 1 : -1, :].contiguous()
