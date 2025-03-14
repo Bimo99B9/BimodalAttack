@@ -85,7 +85,6 @@ class GCGResult:
     losses: List[float]
     strings: List[str]
     adversarial_suffixes: List[str]
-    image_ids: List[str]
     model_outputs: List[str]
 
 
@@ -190,7 +189,7 @@ class GCG:
         self,
         model: transformers.PreTrainedModel,
         tokenizer: transformers.PreTrainedTokenizer,
-        processor,  # processor is passed in to build the prompt
+        processor,
         config: GCGConfig,
         transform=None,
         normalize=None,
@@ -210,10 +209,6 @@ class GCG:
         )
 
         self.stop_flag = False
-
-        self.draft_model = None
-        self.draft_tokenizer = None
-        self.draft_embedding_layer = None
 
         if model.dtype in (torch.float32, torch.float64):
             logger.warning(
@@ -383,6 +378,8 @@ class GCG:
 
         losses = []
         optim_strings = []
+        adv_suffixes = []
+        model_outputs = []
 
         total_gradient_time = 0.0
         total_sampling_time = 0.0
@@ -393,10 +390,6 @@ class GCG:
             logger.warning(f"Using alpha: {config.alpha}, eps: {config.eps}")
             image.requires_grad = True
             image_original = image.clone()
-
-        adv_suffixes = []
-        image_ids = []
-        model_outputs = []
 
         for i in tqdm(range(config.num_steps)):
             iter_start = time.perf_counter()
@@ -516,51 +509,51 @@ class GCG:
             optim_str = tokenizer.batch_decode(optim_ids)[0]
             optim_strings.append(optim_str)
 
-            if i % 10 == 0 and config.debug_output:
-                current_image_id = os.path.join(images_folder, f"image_{i}.png")
-                if config.pgd_attack:
-                    self._save_image(image, current_image_id)
-                    pixel_values = self.normalize(image)
-                    image_features = model.get_image_features(
-                        pixel_values=pixel_values,
-                        vision_feature_layer=-2,
-                        vision_feature_select_strategy="default",
-                    )
-                    input_embeds = torch.cat(
-                        [
-                            self.before_img_embeds.repeat(new_search_width, 1, 1),
-                            image_features.repeat(new_search_width, 1, 1),
-                            self.before_suffix_embeds.repeat(new_search_width, 1, 1),
-                            embedding_layer(sampled_ids),
-                            self.after_embeds.repeat(new_search_width, 1, 1),
-                        ],
-                        dim=1,
-                    )
-                else:
-                    input_embeds = torch.cat(
-                        [
-                            self.before_embeds.repeat(new_search_width, 1, 1),
-                            embedding_layer(sampled_ids),
-                            self.after_embeds.repeat(new_search_width, 1, 1),
-                        ],
-                        dim=1,
-                    )
+            if config.pgd_attack:
+                self._save_image(image, os.path.join(images_folder, f"{i}.png"))
 
-                generated_ids = model.generate(
-                    inputs_embeds=input_embeds, max_new_tokens=150
-                )
-                gen_output = tokenizer.decode(
-                    generated_ids[0], skip_special_tokens=True
-                )
-                logger.info(f"Output generated at iteration {i}: {gen_output}")
+            if config.debug_output and i % 10 == 0:
+                with torch.no_grad():
+                    if config.pgd_attack:
+                        pixel_values = self.normalize(image)
+                        image_features = model.get_image_features(
+                            pixel_values=pixel_values,
+                            vision_feature_layer=-2,
+                            vision_feature_select_strategy="default",
+                        )
+                        input_embeds = torch.cat(
+                            [
+                                self.before_img_embeds.repeat(new_search_width, 1, 1),
+                                image_features.repeat(new_search_width, 1, 1),
+                                self.before_suffix_embeds.repeat(
+                                    new_search_width, 1, 1
+                                ),
+                                embedding_layer(sampled_ids),
+                                self.after_embeds.repeat(new_search_width, 1, 1),
+                            ],
+                            dim=1,
+                        )
+                    else:
+                        input_embeds = torch.cat(
+                            [
+                                self.before_embeds.repeat(new_search_width, 1, 1),
+                                embedding_layer(sampled_ids),
+                                self.after_embeds.repeat(new_search_width, 1, 1),
+                            ],
+                            dim=1,
+                        )
+
+                    generated_ids = model.generate(
+                        inputs_embeds=input_embeds, max_new_tokens=150
+                    )
+                    gen_output = tokenizer.decode(
+                        generated_ids[0], skip_special_tokens=True
+                    )
+                    logger.info(f"Output generated at iteration {i}: {gen_output}")
             else:
-                current_image_id = ""
                 gen_output = ""
-
-            adv_suffixes.append(optim_str)
-            image_ids.append(current_image_id)
             model_outputs.append(gen_output)
-
+            adv_suffixes.append(optim_str)
             buffer.log_buffer(tokenizer)
 
             if self.stop_flag:
@@ -584,9 +577,9 @@ class GCG:
             f"Average candidate loss computation time: {total_loss_time / num_iters:.4f}s"
         )
 
-        # Save the final image to the experiment's images folder.
-        final_image_path = os.path.join(images_folder, f"image_{i}.png")
-        self._save_image(image, final_image_path)
+        if config.pgd_attack:
+            final_image_path = os.path.join(images_folder, f"image_{i}.png")
+            self._save_image(image, final_image_path)
 
         min_loss_index = losses.index(min(losses))
         result = GCGResult(
@@ -595,7 +588,6 @@ class GCG:
             losses=losses,
             strings=optim_strings,
             adversarial_suffixes=adv_suffixes,
-            image_ids=image_ids,
             model_outputs=model_outputs,
         )
         return result
@@ -812,9 +804,6 @@ def run(
     transform=None,
     normalize=None,
 ) -> GCGResult:
-    """
-    Generates a single optimized string using GCG.
-    """
     if config is None:
         config = GCGConfig()
     logger.setLevel(getattr(logging, config.verbosity))
