@@ -1,4 +1,3 @@
 .vscode/
-pgd_images/*
+experiments/*
 *.out
-plots_and_losses/*

@@ -28,6 +28,7 @@ from nanogcg.utils import (
 import requests
 from PIL import Image
 import torchvision.transforms.functional as F
+import os
 
 logger = logging.getLogger("nanogcg")
 if not logger.hasHandlers():
@@ -74,6 +75,7 @@ class GCGConfig:
     pgd_attack: bool = False
     gcg_attack: bool = True
     debug_output: bool = False
+    experiment_folder: str = "experiments/missing_folder"
 
 
 @dataclass
@@ -119,7 +121,7 @@ class AttackBuffer:
             optim_str = tokenizer.batch_decode(ids)[0]
             optim_str = optim_str.replace("\\", "\\\\")
             optim_str = optim_str.replace("\n", "\\n")
-            message += f"\nloss: {loss}" + f" | string: {optim_str}"
+            message += f"\nloss: {loss} | string: {optim_str}"
         logger.info(message)
 
 
@@ -253,6 +255,10 @@ class GCG:
         tokenizer = self.tokenizer
         config = self.config
 
+        # Create an images folder within the experiment folder.
+        images_folder = os.path.join(config.experiment_folder, "images")
+        os.makedirs(images_folder, exist_ok=True)
+
         if config.seed is not None:
             set_seed(config.seed)
             torch.use_deterministic_algorithms(True, warn_only=True)
@@ -269,7 +275,6 @@ class GCG:
                 messages = [{"role": "user", "content": messages}]
             else:
                 messages = copy.deepcopy(messages)
-
                 logger.info(f"Messages 1: {messages}")
 
             # Append the {optim_str} placeholder if not already present.
@@ -299,7 +304,7 @@ class GCG:
             prompt = self.processor.apply_chat_template(
                 messages, add_generation_prompt=True
             )
-            logger.info(f"Prompt after applying chat template from messages: {prompt}")
+            logger.info(f"Prompt after applying chat template: {prompt}")
 
             # Remove BOS token if present.
             if tokenizer.bos_token and prompt.startswith(tokenizer.bos_token):
@@ -308,9 +313,7 @@ class GCG:
 
             if config.pgd_attack:
                 before_img_str, after_img_str = prompt.split("<image>")
-
                 before_suffix_str, after_str = after_img_str.split("{optim_str}")
-
                 logger.info(f"Before image str: {before_img_str}")
                 logger.info(f"Before suffix str: {before_suffix_str}")
                 logger.info(f"After str: {after_str}")
@@ -364,12 +367,10 @@ class GCG:
                 self.before_suffix_embeds = before_suffix_embeds
                 self.after_embeds = after_embeds
                 self.target_embeds = target_embeds
-
             else:
                 before_embeds, after_embeds, target_embeds = [
                     embedding_layer(ids) for ids in (before_ids, after_ids, target_ids)
                 ]
-
                 self.target_ids = target_ids
                 self.before_embeds = before_embeds
                 self.after_embeds = after_embeds
@@ -414,8 +415,6 @@ class GCG:
             if config.pgd_attack:
                 with timed_section(f"Iteration {i}: PGD Update"):
                     start_pgd = time.perf_counter()
-
-                    # PGD Attack update
                     image = (
                         (image - config.alpha * config.eps * torch.sign(image_grad))
                         .detach()
@@ -425,7 +424,6 @@ class GCG:
                         image, image_original - config.eps, image_original + config.eps
                     )
                     image = torch.clamp(image, 0, 1)
-
                     pgd_time = time.perf_counter() - start_pgd
                     total_pgd_time += pgd_time
 
@@ -477,7 +475,6 @@ class GCG:
                             vision_feature_layer=-2,
                             vision_feature_select_strategy="default",
                         )
-
                         input_embeds = torch.cat(
                             [
                                 self.before_img_embeds.repeat(new_search_width, 1, 1),
@@ -520,18 +517,15 @@ class GCG:
             optim_strings.append(optim_str)
 
             if i % 10 == 0 and config.debug_output:
-                current_image_id = f"pgd_images/image_{i}.png"
-
+                current_image_id = os.path.join(images_folder, f"image_{i}.png")
                 if config.pgd_attack:
                     self._save_image(image, current_image_id)
-                    
                     pixel_values = self.normalize(image)
                     image_features = model.get_image_features(
                         pixel_values=pixel_values,
                         vision_feature_layer=-2,
                         vision_feature_select_strategy="default",
                     )
-
                     input_embeds = torch.cat(
                         [
                             self.before_img_embeds.repeat(new_search_width, 1, 1),
@@ -539,7 +533,6 @@ class GCG:
                             self.before_suffix_embeds.repeat(new_search_width, 1, 1),
                             embedding_layer(sampled_ids),
                             self.after_embeds.repeat(new_search_width, 1, 1),
-                            # self.target_embeds.repeat(new_search_width, 1, 1), # Do not include target embeddings in the output
                         ],
                         dim=1,
                     )
@@ -556,18 +549,14 @@ class GCG:
                 generated_ids = model.generate(
                     inputs_embeds=input_embeds, max_new_tokens=150
                 )
-
                 gen_output = tokenizer.decode(
                     generated_ids[0], skip_special_tokens=True
                 )
-                logger.info(
-                    f"Output generated by the model at iteration {i} is: {gen_output}"
-                )
+                logger.info(f"Output generated at iteration {i}: {gen_output}")
             else:
                 current_image_id = ""
                 gen_output = ""
 
-            # Append details for this iteration.
             adv_suffixes.append(optim_str)
             image_ids.append(current_image_id)
             model_outputs.append(gen_output)
@@ -595,7 +584,10 @@ class GCG:
             f"Average candidate loss computation time: {total_loss_time / num_iters:.4f}s"
         )
 
-        self._save_image(image, f"pgd_images/image_{i}.png")
+        # Save the final image to the experiment's images folder.
+        final_image_path = os.path.join(images_folder, f"image_{i}.png")
+        self._save_image(image, final_image_path)
+
         min_loss_index = losses.index(min(losses))
         result = GCGResult(
             best_loss=losses[min_loss_index],
@@ -697,21 +689,9 @@ class GCG:
     def compute_gradient(
         self, optim_ids: torch.Tensor, image: torch.Tensor = None
     ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
-        """
-        Computes the gradient of the GCG loss with respect to the tokens,
-        incorporating an image input if provided.
-
-        Args:
-            optim_ids: Tensor of shape (1, seq_length) representing the text tokens to optimize.
-            image: A tensor representing the image (raw or pre-processed) to be included.
-
-        Returns:
-            A tuple of (token gradient, image gradient).
-        """
         model = self.model
         embedding_layer = self.embedding_layer
 
-        # Compute one-hot representation for the text tokens and obtain their embeddings.
         optim_ids_onehot = torch.nn.functional.one_hot(
             optim_ids, num_classes=embedding_layer.num_embeddings
         )
@@ -730,16 +710,6 @@ class GCG:
                 vision_feature_layer=-2,
                 vision_feature_select_strategy="default",
             )
-            # input_embeds = torch.cat(
-            #     [
-            #         self.before_embeds,
-            #         image_features,
-            #         optim_embeds,
-            #         self.after_embeds,
-            #         self.target_embeds,
-            #     ],
-            #     dim=1,
-            # ) # Example left as reference of what was done before
             input_embeds = torch.cat(
                 [
                     self.before_img_embeds,
@@ -762,11 +732,9 @@ class GCG:
                 dim=1,
             )
 
-        # Forward pass with the combined embeddings.
         output = model(inputs_embeds=input_embeds)
         logits = output.logits
 
-        # Compute loss on the target tokens.
         shift = input_embeds.shape[1] - self.target_ids.shape[1]
         shift_logits = logits[..., shift - 1 : -1, :].contiguous()
         shift_labels = self.target_ids
@@ -792,9 +760,7 @@ class GCG:
             return optim_ids_onehot_grad, None
 
     def _compute_candidates_loss_original(
-        self,
-        search_batch_size: int,
-        input_embeds: Tensor,
+        self, search_batch_size: int, input_embeds: Tensor
     ) -> Tensor:
         all_loss = []
         for i in range(0, input_embeds.shape[0], search_batch_size):
