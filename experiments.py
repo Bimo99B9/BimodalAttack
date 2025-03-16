@@ -125,22 +125,35 @@ def write_experiment_csv(
     logging.info(f"Saved details CSV to {details_csv_path}")
 
     times_csv_path = os.path.join(experiment_folder, "times.csv")
-    
+
     print(f"Gradient Times: {gradient_times}")
     print(f"Sampling Times: {sampling_times}")
     print(f"PGD Times: {pgd_times}")
     print(f"Loss Times: {loss_times}")
-        
+
     with open(times_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(
             ["Iteration", "Gradient Time", "Sampling Time", "PGD Time", "Loss Time"]
         )
         for i, (grad_time, sample_time, pgd_time, loss_time) in enumerate(
-            zip_longest(gradient_times, sampling_times, pgd_times, loss_times, fillvalue=0.0)
+            zip_longest(
+                gradient_times, sampling_times, pgd_times, loss_times, fillvalue=0.0
+            )
         ):
             writer.writerow([i, grad_time, sample_time, pgd_time, loss_time])
     logging.info(f"Saved times CSV to {times_csv_path}")
+
+
+def write_parameters_csv(experiment_folder, config_kwargs, seed):
+    parameters_csv_path = os.path.join(experiment_folder, "parameters.csv")
+    with open(parameters_csv_path, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["Parameter", "Value"])
+        for key, value in config_kwargs.items():
+            writer.writerow([key, value])
+        writer.writerow(["seed", seed])
+    logging.info(f"Saved parameters CSV to {parameters_csv_path}")
 
 
 def get_experiment_folder(config_kwargs, seed):
@@ -212,6 +225,7 @@ def run_experiment(name, config_kwargs):
         result.pgd_times,
         result.loss_times,
     )
+    write_parameters_csv(experiment_folder, config_kwargs, EXPERIMENT_SEED)
 
     best_string_path = os.path.join(experiment_folder, "best_string.txt")
     with open(best_string_path, "w") as f:
