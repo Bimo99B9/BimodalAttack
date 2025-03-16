@@ -1,3 +1,4 @@
+from itertools import zip_longest
 import requests
 import nanogcg
 import torch
@@ -97,7 +98,16 @@ def plot_losses(experiment_name, seed, config, losses, experiment_folder):
     logging.info(f"Saved loss plot to {plot_filename}")
 
 
-def write_experiment_csv(experiment_folder, losses, adv_suffixes, model_outputs):
+def write_experiment_csv(
+    experiment_folder,
+    losses,
+    adv_suffixes,
+    model_outputs,
+    gradient_times,
+    sampling_times,
+    pgd_times,
+    loss_times,
+):
     losses_csv_path = os.path.join(experiment_folder, "losses.csv")
     with open(losses_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -113,6 +123,24 @@ def write_experiment_csv(experiment_folder, losses, adv_suffixes, model_outputs)
         for i, (suffix, output) in enumerate(zip(adv_suffixes, model_outputs)):
             writer.writerow([i, suffix, output])
     logging.info(f"Saved details CSV to {details_csv_path}")
+
+    times_csv_path = os.path.join(experiment_folder, "times.csv")
+    
+    print(f"Gradient Times: {gradient_times}")
+    print(f"Sampling Times: {sampling_times}")
+    print(f"PGD Times: {pgd_times}")
+    print(f"Loss Times: {loss_times}")
+        
+    with open(times_csv_path, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            ["Iteration", "Gradient Time", "Sampling Time", "PGD Time", "Loss Time"]
+        )
+        for i, (grad_time, sample_time, pgd_time, loss_time) in enumerate(
+            zip_longest(gradient_times, sampling_times, pgd_times, loss_times, fillvalue=0.0)
+        ):
+            writer.writerow([i, grad_time, sample_time, pgd_time, loss_time])
+    logging.info(f"Saved times CSV to {times_csv_path}")
 
 
 def get_experiment_folder(config_kwargs, seed):
@@ -151,12 +179,11 @@ def run_experiment(name, config_kwargs):
             target,
             image,
             config,
-            transform=transform,
             normalize=normalize,
         )
         total_time = time.time() - start_time
         loss = result.best_loss
-        losses = result.losses if hasattr(result, "losses") else []
+        losses = result.losses
     except Exception as e:
         logging.exception(f"Error during experiment with seed {EXPERIMENT_SEED}:")
         from nanogcg import GCGResult
@@ -180,6 +207,10 @@ def run_experiment(name, config_kwargs):
         losses,
         result.adversarial_suffixes,
         result.model_outputs,
+        result.gradient_times,
+        result.sampling_times,
+        result.pgd_times,
+        result.loss_times,
     )
 
     best_string_path = os.path.join(experiment_folder, "best_string.txt")
@@ -194,16 +225,56 @@ def run_experiment(name, config_kwargs):
         best_iter = -1
         best_loss = float("nan")
 
-    # Save best result summary.
-    best_result_path = os.path.join(experiment_folder, "best_result.txt")
-    with open(best_result_path, "w") as f:
-        f.write(f"Best iteration: {best_iter}\n")
-        f.write(f"Best loss: {best_loss}\n")
-        f.write(f"Best string: {result.best_string}\n")
+    # Save summary.
+    best_result_csv_path = os.path.join(experiment_folder, "summary.csv")
+    with open(best_result_csv_path, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "Best Iteration",
+                "Best Loss",
+                "Best String",
+                "Avg Gradient Time",
+                "Std Gradient Time",
+                "Avg Sampling Time",
+                "Std Sampling Time",
+                "Avg PGD Time",
+                "Std PGD Time",
+                "Avg Loss Time",
+                "Std Loss Time",
+            ]
+        )
+        writer.writerow(
+            [
+                best_iter,
+                best_loss,
+                result.best_string,
+                np.mean(result.gradient_times),
+                np.std(result.gradient_times),
+                np.mean(result.sampling_times),
+                np.std(result.sampling_times),
+                np.mean(result.pgd_times),
+                np.std(result.pgd_times),
+                np.mean(result.loss_times),
+                np.std(result.loss_times),
+            ]
+        )
 
-        logging.info(f"Best iteration: {best_iter}")
-        logging.info(f"Best loss: {best_loss}")
-        logging.info(f"Best string: {result.best_string}")
+    logging.info(f"Best iteration: {best_iter}")
+    logging.info(f"Best loss: {best_loss}")
+    logging.info(f"Best string: {result.best_string}")
+    logging.info(f"Average gradient time: {np.mean(result.gradient_times)}")
+    logging.info(
+        f"Standard deviation of gradient time: {np.std(result.gradient_times)}"
+    )
+    logging.info(f"Average sampling time: {np.mean(result.sampling_times)}")
+    logging.info(
+        f"Standard deviation of sampling time: {np.std(result.sampling_times)}"
+    )
+    logging.info(f"Average PGD time: {np.mean(result.pgd_times)}")
+    logging.info(f"Standard deviation of PGD time: {np.std(result.pgd_times)}")
+    logging.info(f"Average loss time: {np.mean(result.loss_times)}")
+    logging.info(f"Standard deviation of loss time: {np.std(result.loss_times)}")
 
 
 # Example configurations:
@@ -231,7 +302,7 @@ dynamic_search_configuration = {
 }
 
 pgd_only_configuration = {
-    "num_steps": 600,
+    "num_steps": 15,
     "pgd_attack": True,
     "gcg_attack": False,
     "alpha": 2 / 255,
