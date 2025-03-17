@@ -1,4 +1,6 @@
+#!/usr/bin/env python
 from itertools import zip_longest
+import argparse
 import requests
 import nanogcg
 import torch
@@ -125,12 +127,10 @@ def write_experiment_csv(
     logging.info(f"Saved details CSV to {details_csv_path}")
 
     times_csv_path = os.path.join(experiment_folder, "times.csv")
-
     print(f"Gradient Times: {gradient_times}")
     print(f"Sampling Times: {sampling_times}")
     print(f"PGD Times: {pgd_times}")
     print(f"Loss Times: {loss_times}")
-
     with open(times_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(
@@ -291,58 +291,87 @@ def run_experiment(name, config_kwargs):
     logging.info(f"Standard deviation of loss time: {np.std(result.loss_times)}")
 
 
-# Example configurations:
-base_configuration = {
-    "num_steps": 250,
-    "search_width": 512,
-    "dynamic_search": False,
-    "min_search_width": 512,
-    "pgd_attack": True,
-    "gcg_attack": True,
-    "alpha": 2 / 255,
-    "eps": 64 / 255,
-    "debug_output": False,
-}
-
-dynamic_search_configuration = {
-    "num_steps": 250,
-    "search_width": 512,
-    "dynamic_search": True,
-    "min_search_width": 32,
-    "pgd_attack": True,
-    "gcg_attack": True,
-    "alpha": 2 / 255,
-    "eps": 64 / 255,
-    "debug_output": False,
-}
-
-pgd_only_configuration = {
-    "num_steps": 600,
-    "search_width": 0,
-    "dynamic_search": False,
-    "min_search_width": 0,
-    "pgd_attack": True,
-    "gcg_attack": False,
-    "alpha": 2 / 255,
-    "eps": 64 / 255,
-    "debug_output": True,
-}
-
-gcg_only_configuration = {
-    "num_steps": 250,
-    "search_width": 512,
-    "dynamic_search": False,
-    "min_search_width": 512,
-    "pgd_attack": False,
-    "gcg_attack": True,
-    "alpha": 2 / 255,
-    "eps": 64 / 255,
-    "debug_output": False,
-}
+def fraction_type(s):
+    """
+    Accept a fraction in the form 'numerator/denominator' or a simple float.
+    """
+    try:
+        if "/" in s:
+            num, denom = s.split("/")
+            return float(num) / float(denom)
+        return float(s)
+    except Exception as e:
+        raise argparse.ArgumentTypeError(f"Invalid fraction value: {s}")
 
 
-# Uncomment the experiments you wish to run:
-# run_experiment("Dynamic Search Configuration 3", dynamic_search_configuration)
-# run_experiment("Base Configuration", base_configuration)
-# run_experiment("GCG Only Configuration", gcg_only_configuration)
-run_experiment("PGD Only Configuration", pgd_only_configuration)
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Run a single experiment with given configuration parameters."
+    )
+    parser.add_argument(
+        "--name", type=str, required=True, help="Name of the experiment"
+    )
+    parser.add_argument("--num_steps", type=int, required=True, help="Number of steps")
+    parser.add_argument("--search_width", type=int, required=True, help="Search width")
+    parser.add_argument(
+        "--dynamic_search",
+        type=str2bool,
+        required=True,
+        help="Whether dynamic search is enabled",
+    )
+    parser.add_argument(
+        "--min_search_width", type=int, required=True, help="Minimum search width"
+    )
+    parser.add_argument(
+        "--pgd_attack",
+        type=str2bool,
+        required=True,
+        help="Whether PGD attack is enabled",
+    )
+    parser.add_argument(
+        "--gcg_attack",
+        type=str2bool,
+        required=True,
+        help="Whether GCG attack is enabled",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=fraction_type,
+        required=True,
+        help="Alpha value as a fraction (e.g. '2/255')",
+    )
+    parser.add_argument(
+        "--eps",
+        type=fraction_type,
+        required=True,
+        help="Epsilon value as a fraction (e.g. '64/255')",
+    )
+    parser.add_argument(
+        "--debug_output", type=str2bool, required=True, help="Debug output flag"
+    )
+
+    args = parser.parse_args()
+
+    config_kwargs = {
+        "num_steps": args.num_steps,
+        "search_width": args.search_width,
+        "dynamic_search": args.dynamic_search,
+        "min_search_width": args.min_search_width,
+        "pgd_attack": args.pgd_attack,
+        "gcg_attack": args.gcg_attack,
+        "alpha": args.alpha,
+        "eps": args.eps,
+        "debug_output": args.debug_output,
+    }
+    run_experiment(args.name, config_kwargs)
