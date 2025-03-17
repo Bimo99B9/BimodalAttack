@@ -296,6 +296,7 @@ base_configuration = {
     "num_steps": 250,
     "search_width": 512,
     "dynamic_search": False,
+    "min_search_width": 512,
     "pgd_attack": True,
     "gcg_attack": True,
     "alpha": 2 / 255,
@@ -316,7 +317,10 @@ dynamic_search_configuration = {
 }
 
 pgd_only_configuration = {
-    "num_steps": 15,
+    "num_steps": 600,
+    "search_width": 0,
+    "dynamic_search": False,
+    "min_search_width": 0,
     "pgd_attack": True,
     "gcg_attack": False,
     "alpha": 2 / 255,
@@ -327,9 +331,15 @@ pgd_only_configuration = {
 gcg_only_configuration = {
     "num_steps": 250,
     "search_width": 512,
+    "dynamic_search": False,
+    "min_search_width": 512,
     "pgd_attack": False,
     "gcg_attack": True,
+    "alpha": 2 / 255,
+    "eps": 64 / 255,
+    "debug_output": False,
 }
+
 
 # Uncomment the experiments you wish to run:
 # run_experiment("Dynamic Search Configuration 3", dynamic_search_configuration)
