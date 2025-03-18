@@ -128,11 +128,11 @@ def write_experiment_csv(
     logging.info(f"Saved details CSV to {details_csv_path}")
 
     times_csv_path = os.path.join(experiment_folder, "times.csv")
-    print(f"Gradient Times: {gradient_times}")
-    print(f"Sampling Times: {sampling_times}")
-    print(f"PGD Times: {pgd_times}")
-    print(f"Loss Times: {loss_times}")
-    print(f"Total Times: {total_times}")
+    # print(f"Gradient Times: {gradient_times}")
+    # print(f"Sampling Times: {sampling_times}")
+    # print(f"PGD Times: {pgd_times}")
+    # print(f"Loss Times: {loss_times}")
+    # print(f"Total Times: {total_times}")
     with open(times_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(
