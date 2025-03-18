@@ -75,6 +75,7 @@ class GCGResult:
     sampling_times: List[float]
     loss_times: List[float]
     pgd_times: List[float]
+    total_times: List[float] = None
 
 
 class AttackBuffer:
@@ -373,6 +374,7 @@ class GCG:
         sampling_times = []
         loss_times = []
         pgd_times = []
+        total_times = []
 
         total_gradient_time = 0.0
         total_sampling_time = 0.0
@@ -560,6 +562,7 @@ class GCG:
             iter_total = (
                 grad_time + sampling_time + pgd_time + loss_time
             )  # Compute total iteration time based on individual times.
+            total_times.append(iter_total)
 
             logger.info(
                 f"[Iteration {i}] Total iteration time: {iter_total:.4f}s (Gradient: {grad_time:.4f}s, Sampling: {sampling_time:.4f}s, PGD: {pgd_time:.4f}s, Loss: {loss_time:.4f}s)"
@@ -591,6 +594,7 @@ class GCG:
             sampling_times=sampling_times,
             loss_times=loss_times,
             pgd_times=pgd_times,
+            total_times=total_times,
         )
         return result
 

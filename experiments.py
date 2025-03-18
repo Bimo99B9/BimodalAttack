@@ -109,6 +109,7 @@ def write_experiment_csv(
     sampling_times,
     pgd_times,
     loss_times,
+    total_times  # new parameter for total times per iteration
 ):
     losses_csv_path = os.path.join(experiment_folder, "losses.csv")
     with open(losses_csv_path, "w", newline="") as csvfile:
@@ -131,17 +132,18 @@ def write_experiment_csv(
     print(f"Sampling Times: {sampling_times}")
     print(f"PGD Times: {pgd_times}")
     print(f"Loss Times: {loss_times}")
+    print(f"Total Times: {total_times}")
     with open(times_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(
-            ["Iteration", "Gradient Time", "Sampling Time", "PGD Time", "Loss Time"]
+            ["Iteration", "Gradient Time", "Sampling Time", "PGD Time", "Loss Time", "Total Time"]
         )
-        for i, (grad_time, sample_time, pgd_time, loss_time) in enumerate(
+        for i, (grad_time, sample_time, pgd_time, loss_time, tot_time) in enumerate(
             zip_longest(
-                gradient_times, sampling_times, pgd_times, loss_times, fillvalue=0.0
+                gradient_times, sampling_times, pgd_times, loss_times, total_times, fillvalue=0.0
             )
         ):
-            writer.writerow([i, grad_time, sample_time, pgd_time, loss_time])
+            writer.writerow([i, grad_time, sample_time, pgd_time, loss_time, tot_time])
     logging.info(f"Saved times CSV to {times_csv_path}")
 
 
@@ -200,7 +202,6 @@ def run_experiment(name, config_kwargs):
     except Exception as e:
         logging.exception(f"Error during experiment with seed {EXPERIMENT_SEED}:")
         from nanogcg import GCGResult
-
         result = GCGResult(
             best_loss=float("nan"),
             best_string="",
@@ -208,6 +209,11 @@ def run_experiment(name, config_kwargs):
             strings=[],
             adversarial_suffixes=[],
             model_outputs=[],
+            gradient_times=[],
+            sampling_times=[],
+            pgd_times=[],
+            loss_times=[],
+            total_times=[],
         )
         loss = float("nan")
         total_time = 0
@@ -224,6 +230,7 @@ def run_experiment(name, config_kwargs):
         result.sampling_times,
         result.pgd_times,
         result.loss_times,
+        result.total_times  # pass the new total_times list
     )
     write_parameters_csv(experiment_folder, config_kwargs, EXPERIMENT_SEED)
 
@@ -256,6 +263,8 @@ def run_experiment(name, config_kwargs):
                 "Std PGD Time",
                 "Avg Loss Time",
                 "Std Loss Time",
+                "Avg Total Time",    # new columns for total_times
+                "Std Total Time",
             ]
         )
         writer.writerow(
@@ -271,6 +280,8 @@ def run_experiment(name, config_kwargs):
                 np.std(result.pgd_times),
                 np.mean(result.loss_times),
                 np.std(result.loss_times),
+                np.mean(result.total_times),
+                np.std(result.total_times),
             ]
         )
 
@@ -278,17 +289,21 @@ def run_experiment(name, config_kwargs):
     logging.info(f"Best loss: {best_loss}")
     logging.info(f"Best string: {result.best_string}")
     logging.info(f"Average gradient time: {np.mean(result.gradient_times)}")
-    logging.info(
-        f"Standard deviation of gradient time: {np.std(result.gradient_times)}"
-    )
+    logging.info(f"Standard deviation of gradient time: {np.std(result.gradient_times)}")
     logging.info(f"Average sampling time: {np.mean(result.sampling_times)}")
-    logging.info(
-        f"Standard deviation of sampling time: {np.std(result.sampling_times)}"
-    )
+    logging.info(f"Standard deviation of sampling time: {np.std(result.sampling_times)}")
     logging.info(f"Average PGD time: {np.mean(result.pgd_times)}")
     logging.info(f"Standard deviation of PGD time: {np.std(result.pgd_times)}")
     logging.info(f"Average loss time: {np.mean(result.loss_times)}")
     logging.info(f"Standard deviation of loss time: {np.std(result.loss_times)}")
+    logging.info(f"Average total time: {np.mean(result.total_times)}")
+    logging.info(f"Standard deviation of total time: {np.std(result.total_times)}")
+
+    # Optional: Check that each iteration's total time equals the sum of its individual times.
+    # Uncomment the following block to log any discrepancies.
+    # for i, (gt, st, pt, lt, tot) in enumerate(zip(result.gradient_times, result.sampling_times, result.pgd_times, result.loss_times, result.total_times)):
+    #     if not np.isclose(tot, gt + st + pt + lt):
+    #         logging.warning(f"Iteration {i}: Total time mismatch: total {tot} vs sum {gt + st + pt + lt}")
 
 
 def fraction_type(s):
