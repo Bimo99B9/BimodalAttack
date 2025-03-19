@@ -83,7 +83,9 @@ def plot_losses(experiment_name, seed, config, losses, experiment_folder):
     plt.ylabel("Loss")
     plt.title(f"{experiment_name} (Seed {seed})")
     ax = plt.gca()
-    config_text = "\n".join(f"{k}: {v}" for k, v in config.items())
+    config_text = "\n".join(
+        f"{k}: {v}" for k, v in config.items() if not k.endswith("_str")
+    )
     props = dict(boxstyle="round", facecolor="white", alpha=0.5)
     ax.text(
         0.02,
@@ -109,7 +111,7 @@ def write_experiment_csv(
     sampling_times,
     pgd_times,
     loss_times,
-    total_times  # new parameter for total times per iteration
+    total_times,
 ):
     losses_csv_path = os.path.join(experiment_folder, "losses.csv")
     with open(losses_csv_path, "w", newline="") as csvfile:
@@ -128,19 +130,26 @@ def write_experiment_csv(
     logging.info(f"Saved details CSV to {details_csv_path}")
 
     times_csv_path = os.path.join(experiment_folder, "times.csv")
-    # print(f"Gradient Times: {gradient_times}")
-    # print(f"Sampling Times: {sampling_times}")
-    # print(f"PGD Times: {pgd_times}")
-    # print(f"Loss Times: {loss_times}")
-    # print(f"Total Times: {total_times}")
     with open(times_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(
-            ["Iteration", "Gradient Time", "Sampling Time", "PGD Time", "Loss Time", "Total Time"]
+            [
+                "Iteration",
+                "Gradient Time",
+                "Sampling Time",
+                "PGD Time",
+                "Loss Time",
+                "Total Time",
+            ]
         )
         for i, (grad_time, sample_time, pgd_time, loss_time, tot_time) in enumerate(
             zip_longest(
-                gradient_times, sampling_times, pgd_times, loss_times, total_times, fillvalue=0.0
+                gradient_times,
+                sampling_times,
+                pgd_times,
+                loss_times,
+                total_times,
+                fillvalue=0.0,
             )
         ):
             writer.writerow([i, grad_time, sample_time, pgd_time, loss_time, tot_time])
@@ -152,22 +161,50 @@ def write_parameters_csv(experiment_folder, config_kwargs, seed):
     with open(parameters_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Parameter", "Value"])
+        # For alpha and eps, use the raw string values if available.
         for key, value in config_kwargs.items():
-            writer.writerow([key, value])
+            if key == "alpha":
+                if "alpha_str" in config_kwargs:
+                    writer.writerow(["alpha", config_kwargs["alpha_str"]])
+                else:
+                    writer.writerow([key, value])
+            elif key == "eps":
+                if "eps_str" in config_kwargs:
+                    writer.writerow(["eps", config_kwargs["eps_str"]])
+                else:
+                    writer.writerow([key, value])
+            elif key.endswith("_str"):
+                # Skip raw value duplicates.
+                continue
+            else:
+                writer.writerow([key, value])
         writer.writerow(["seed", seed])
     logging.info(f"Saved parameters CSV to {parameters_csv_path}")
 
 
 def get_experiment_folder(config_kwargs, seed):
-    keys_to_exclude = {"debug_output"}
-    folder_parts = []
-    for key, value in sorted(config_kwargs.items()):
-        if key in keys_to_exclude:
+    """
+    Instead of encoding the configuration parameters in the folder name,
+    this function now numbers the experiments sequentially.
+    """
+    base_dir = "experiments"
+    # List all directories in the experiments folder that start with 'exp'
+    existing_experiments = [
+        d
+        for d in os.listdir(base_dir)
+        if os.path.isdir(os.path.join(base_dir, d)) and d.startswith("exp")
+    ]
+    max_num = 0
+    for d in existing_experiments:
+        try:
+            num = int(d[3:])
+            if num > max_num:
+                max_num = num
+        except ValueError:
             continue
-        folder_parts.append(f"{key}_{str(value).replace('/', '-')}")
-    folder_parts.append(f"seed_{seed}")
-    folder_name = "_".join(folder_parts)
-    return os.path.join("experiments", folder_name)
+    new_exp_num = max_num + 1
+    folder_name = f"exp{new_exp_num}"
+    return os.path.join(base_dir, folder_name)
 
 
 def run_experiment(name, config_kwargs):
@@ -178,8 +215,9 @@ def run_experiment(name, config_kwargs):
     torch.cuda.empty_cache()
     gc.collect()
     set_global_seed(EXPERIMENT_SEED)
+    # Use the computed values for running the experiment.
     config = GCGConfig(
-        **config_kwargs,
+        **{k: v for k, v in config_kwargs.items() if not k.endswith("_str")},
         seed=EXPERIMENT_SEED,
         verbosity="DEBUG",
         experiment_folder=experiment_folder,
@@ -202,6 +240,7 @@ def run_experiment(name, config_kwargs):
     except Exception as e:
         logging.exception(f"Error during experiment with seed {EXPERIMENT_SEED}:")
         from nanogcg import GCGResult
+
         result = GCGResult(
             best_loss=float("nan"),
             best_string="",
@@ -230,7 +269,7 @@ def run_experiment(name, config_kwargs):
         result.sampling_times,
         result.pgd_times,
         result.loss_times,
-        result.total_times  # pass the new total_times list
+        result.total_times,
     )
     write_parameters_csv(experiment_folder, config_kwargs, EXPERIMENT_SEED)
 
@@ -246,7 +285,6 @@ def run_experiment(name, config_kwargs):
         best_iter = -1
         best_loss = float("nan")
 
-    # Save summary.
     best_result_csv_path = os.path.join(experiment_folder, "summary.csv")
     with open(best_result_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -263,7 +301,7 @@ def run_experiment(name, config_kwargs):
                 "Std PGD Time",
                 "Avg Loss Time",
                 "Std Loss Time",
-                "Avg Total Time",    # new columns for total_times
+                "Avg Total Time",
                 "Std Total Time",
             ]
         )
@@ -289,21 +327,19 @@ def run_experiment(name, config_kwargs):
     logging.info(f"Best loss: {best_loss}")
     logging.info(f"Best string: {result.best_string}")
     logging.info(f"Average gradient time: {np.mean(result.gradient_times)}")
-    logging.info(f"Standard deviation of gradient time: {np.std(result.gradient_times)}")
+    logging.info(
+        f"Standard deviation of gradient time: {np.std(result.gradient_times)}"
+    )
     logging.info(f"Average sampling time: {np.mean(result.sampling_times)}")
-    logging.info(f"Standard deviation of sampling time: {np.std(result.sampling_times)}")
+    logging.info(
+        f"Standard deviation of sampling time: {np.std(result.sampling_times)}"
+    )
     logging.info(f"Average PGD time: {np.mean(result.pgd_times)}")
     logging.info(f"Standard deviation of PGD time: {np.std(result.pgd_times)}")
     logging.info(f"Average loss time: {np.mean(result.loss_times)}")
     logging.info(f"Standard deviation of loss time: {np.std(result.loss_times)}")
     logging.info(f"Average total time: {np.mean(result.total_times)}")
     logging.info(f"Standard deviation of total time: {np.std(result.total_times)}")
-
-    # Optional: Check that each iteration's total time equals the sum of its individual times.
-    # Uncomment the following block to log any discrepancies.
-    # for i, (gt, st, pt, lt, tot) in enumerate(zip(result.gradient_times, result.sampling_times, result.pgd_times, result.loss_times, result.total_times)):
-    #     if not np.isclose(tot, gt + st + pt + lt):
-    #         logging.warning(f"Iteration {i}: Total time mismatch: total {tot} vs sum {gt + st + pt + lt}")
 
 
 def fraction_type(s):
@@ -360,15 +396,16 @@ if __name__ == "__main__":
         required=True,
         help="Whether GCG attack is enabled",
     )
+    # Accept alpha and eps as strings so we can keep the original fraction format.
     parser.add_argument(
         "--alpha",
-        type=fraction_type,
+        type=str,
         required=True,
         help="Alpha value as a fraction (e.g. '2/255')",
     )
     parser.add_argument(
         "--eps",
-        type=fraction_type,
+        type=str,
         required=True,
         help="Epsilon value as a fraction (e.g. '64/255')",
     )
@@ -378,6 +415,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    alpha_float = fraction_type(args.alpha)
+    eps_float = fraction_type(args.eps)
+
     config_kwargs = {
         "num_steps": args.num_steps,
         "search_width": args.search_width,
@@ -385,8 +425,10 @@ if __name__ == "__main__":
         "min_search_width": args.min_search_width,
         "pgd_attack": args.pgd_attack,
         "gcg_attack": args.gcg_attack,
-        "alpha": args.alpha,
-        "eps": args.eps,
+        "alpha": alpha_float,
+        "eps": eps_float,
         "debug_output": args.debug_output,
+        "alpha_str": args.alpha,
+        "eps_str": args.eps,
     }
     run_experiment(args.name, config_kwargs)

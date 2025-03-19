@@ -466,10 +466,11 @@ class GCG:
                         vision_feature_layer=-2,
                         vision_feature_select_strategy="default",
                     )
-                    input_embeds = torch.cat(
+                    # Candidate evaluation WITHOUT the image features:
+                    candidate_input_embeds = torch.cat(
                         [
                             self.before_img_embeds.repeat(new_search_width, 1, 1),
-                            image_features.repeat(new_search_width, 1, 1),
+                            # image_features.repeat(new_search_width, 1, 1),
                             self.before_suffix_embeds.repeat(new_search_width, 1, 1),
                             embedding_layer(sampled_ids),
                             self.after_embeds.repeat(new_search_width, 1, 1),
@@ -477,7 +478,35 @@ class GCG:
                         ],
                         dim=1,
                     )
+                    # Compute candidate losses without the image features
+                    loss = find_executable_batch_size(
+                        self._compute_candidates_loss_original, batch_size
+                    )(candidate_input_embeds)
+                    
+                    best_loss_before_image = loss.min().item()
+                    best_idx = loss.argmin()
+                    logger.info(f"[Iteration {i}] Best loss before evaluation with image: {best_loss_before_image:.4f}")
+                    
+                    # Recompute the loss for the selected candidate including the image
+                    full_input_embeds = torch.cat(
+                        [
+                            self.before_img_embeds,
+                            image_features,
+                            self.before_suffix_embeds,
+                            embedding_layer(sampled_ids[best_idx].unsqueeze(0)),
+                            self.after_embeds,
+                            self.target_embeds,
+                        ],
+                        dim=1,
+                    )
+                    # Compute the full loss for the selected candidate (batch size = 1)
+                    full_loss = self._compute_candidates_loss_original(
+                        1, full_input_embeds
+                    )
+                    current_loss = full_loss.item()
+                    optim_ids = sampled_ids[best_idx].unsqueeze(0)
                 else:
+                    # Normal case – build the embeddings as usual:
                     input_embeds = torch.cat(
                         [
                             self.before_embeds.repeat(new_search_width, 1, 1),
@@ -487,13 +516,13 @@ class GCG:
                         ],
                         dim=1,
                     )
+                    loss = find_executable_batch_size(
+                        self._compute_candidates_loss_original, batch_size
+                    )(input_embeds)
+                    current_loss = loss.min().item()
+                    optim_ids = sampled_ids[loss.argmin()].unsqueeze(0)
 
-                loss = find_executable_batch_size(
-                    self._compute_candidates_loss_original, batch_size
-                )(input_embeds)
-                current_loss = loss.min().item()
                 logger.info(f"[Iteration {i}] Current loss: {current_loss:.4f}")
-                optim_ids = sampled_ids[loss.argmin()].unsqueeze(0)
                 loss_time = time.perf_counter() - start_loss
                 loss_times.append(loss_time)
                 total_loss_time += loss_time
@@ -680,7 +709,7 @@ class GCG:
         init_buffer_losses = find_executable_batch_size(
             self._compute_candidates_loss_original, true_buffer_size
         )(init_buffer_embeds)
-        
+
         for i in range(true_buffer_size):
             buffer.add(init_buffer_losses[i], init_buffer_ids[[i]])
         buffer.log_buffer(tokenizer)
