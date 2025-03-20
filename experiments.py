@@ -27,7 +27,7 @@ os.makedirs("experiments", exist_ok=True)
 
 EXPERIMENT_SEED = 1
 USE_ALL_PROMPTS = False
-NUM_PROMPTS = 2
+NUM_PROMPTS = 10
 ADV_BENCH_FILE = "data/advbench/harmful_behaviors.csv"
 
 
@@ -90,24 +90,44 @@ raw_image = Image.open(requests.get(image_file, stream=True).raw).convert("RGB")
 image = transform(raw_image).unsqueeze(0).to(model.device)
 
 
+# --- Folder helper functions ---
+
+
+def get_experiment_folder():
+    base_dir = "experiments"
+    existing_experiments = [
+        d
+        for d in os.listdir(base_dir)
+        if os.path.isdir(os.path.join(base_dir, d)) and d.startswith("exp")
+    ]
+    max_num = 0
+    for d in existing_experiments:
+        try:
+            num = int(d[3:])
+            if num > max_num:
+                max_num = num
+        except ValueError:
+            continue
+    new_exp_num = max_num + 1
+    experiment_folder_name = f"exp{new_exp_num}"
+    experiment_folder = os.path.join(base_dir, experiment_folder_name)
+    os.makedirs(experiment_folder, exist_ok=True)
+    return experiment_folder
+
+
+def get_images_folder(experiment_folder, pair_number):
+    images_folder = os.path.join(experiment_folder, f"images_{pair_number}")
+    os.makedirs(images_folder, exist_ok=True)
+    return images_folder
+
+
 # --- Run experiments across multiple (goal, target) pairs ---
 def run_experiment(name, config_kwargs, advbench_pairs):
-    logging.info(
-        f"--- Starting Experiment: {name} with {len(advbench_pairs)} prompt-target pairs ---"
-    )
-    experiment_folder = get_experiment_folder(config_kwargs, EXPERIMENT_SEED)
-    os.makedirs(experiment_folder, exist_ok=True)
-    logging.info(f"Results will be saved in: {experiment_folder}")
+    experiment_folder = get_experiment_folder()
+    logging.info(f"Experiment folder created: {experiment_folder}")
     torch.cuda.empty_cache()
     gc.collect()
     set_global_seed(EXPERIMENT_SEED)
-
-    config = GCGConfig(
-        **{k: v for k, v in config_kwargs.items() if not k.endswith("_str")},
-        seed=EXPERIMENT_SEED,
-        verbosity="DEBUG",
-        experiment_folder=experiment_folder,
-    )
 
     # Aggregated results lists
     all_losses = []  # list of lists, one per run
@@ -124,8 +144,18 @@ def run_experiment(name, config_kwargs, advbench_pairs):
 
     # Loop over each (goal, target) pair
     for idx, (goal, target_text) in enumerate(advbench_pairs):
+        pair_number = idx + 1  # 1-indexed pair number
+        images_folder = get_images_folder(experiment_folder, pair_number)
+        # Build a config for the current run using a unique images folder.
+        config = GCGConfig(
+            **{k: v for k, v in config_kwargs.items() if not k.endswith("_str")},
+            seed=EXPERIMENT_SEED,
+            verbosity="DEBUG",
+            experiment_folder=experiment_folder,
+            images_folder=images_folder,
+        )
         logging.info(
-            f"--- Running prompt-target pair {idx+1}/{len(advbench_pairs)} ---"
+            f"--- Running prompt-target pair {pair_number}/{len(advbench_pairs)} ---"
         )
         messages = [{"role": "user", "content": goal}]
         target = target_text
@@ -146,7 +176,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             run_losses = result.losses
         except Exception as e:
             logging.exception(
-                f"Error during experiment run {idx+1} with seed {EXPERIMENT_SEED}:"
+                f"Error during experiment run {pair_number} with seed {EXPERIMENT_SEED}:"
             )
             from nanogcg import GCGResult
 
@@ -167,7 +197,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             run_time = 0
             run_losses = []
         logging.info(
-            f"Run {idx+1} (Seed={EXPERIMENT_SEED}) -> Loss={run_loss:.4f}, Time={run_time:.2f}s"
+            f"Run {pair_number} (Seed={EXPERIMENT_SEED}) -> Loss={run_loss:.4f}, Time={run_time:.2f}s"
         )
 
         all_losses.append(run_losses)
@@ -209,7 +239,6 @@ def run_experiment(name, config_kwargs, advbench_pairs):
         for i in range(len(all_details)):
             header += [f"Run {i+1} Suffix", f"Run {i+1} Output"]
         writer.writerow(header)
-        # Determine maximum iterations among all runs
         num_iterations = max((len(details[0]) for details in all_details), default=0)
         for i in range(num_iterations):
             row = [i]
@@ -252,10 +281,10 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             writer.writerow(row)
     logging.info(f"Saved aggregated times CSV to {times_csv_path}")
 
-    # Save experiment parameters (same as before)
+    # Save experiment parameters
     write_parameters_csv(experiment_folder, config_kwargs, EXPERIMENT_SEED)
 
-    # Save all best strings to a file (one per run)
+    # Save all best strings to a file
     best_strings_path = os.path.join(experiment_folder, "best_strings.txt")
     with open(best_strings_path, "w") as f:
         for i, s in enumerate(all_best_strings):
@@ -272,7 +301,6 @@ def run_experiment(name, config_kwargs, advbench_pairs):
         writer.writerow(["Average Best Loss", avg_best_loss])
         writer.writerow(["Std Best Loss", std_best_loss])
 
-        # Compute average and std of each timing metric across runs (using each run's average)
         def compute_avg_and_std(time_lists):
             means = [np.mean(t) if len(t) > 0 else float("nan") for t in time_lists]
             return np.mean(means), np.std(means)
@@ -348,21 +376,6 @@ def plot_losses(experiment_name, seed, config, losses, experiment_folder):
     logging.info(f"Saved loss plot to {plot_filename}")
 
 
-def write_experiment_csv(
-    experiment_folder,
-    losses,
-    adv_suffixes,
-    model_outputs,
-    gradient_times,
-    sampling_times,
-    pgd_times,
-    loss_times,
-    total_times,
-):
-    # This function is no longer used in the multi-prompt version
-    pass
-
-
 def write_parameters_csv(experiment_folder, config_kwargs, seed):
     parameters_csv_path = os.path.join(experiment_folder, "parameters.csv")
     with open(parameters_csv_path, "w", newline="") as csvfile:
@@ -385,26 +398,6 @@ def write_parameters_csv(experiment_folder, config_kwargs, seed):
                 writer.writerow([key, value])
         writer.writerow(["seed", seed])
     logging.info(f"Saved parameters CSV to {parameters_csv_path}")
-
-
-def get_experiment_folder(config_kwargs, seed):
-    base_dir = "experiments"
-    existing_experiments = [
-        d
-        for d in os.listdir(base_dir)
-        if os.path.isdir(os.path.join(base_dir, d)) and d.startswith("exp")
-    ]
-    max_num = 0
-    for d in existing_experiments:
-        try:
-            num = int(d[3:])
-            if num > max_num:
-                max_num = num
-        except ValueError:
-            continue
-    new_exp_num = max_num + 1
-    folder_name = f"exp{new_exp_num}"
-    return os.path.join(base_dir, folder_name)
 
 
 def fraction_type(s):
@@ -473,6 +466,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--debug_output", type=str2bool, required=True, help="Debug output flag"
     )
+    parser.add_argument(
+        "--joint_eval", type=str2bool, required=True, help="Joint evaluation flag"
+    )
 
     args = parser.parse_args()
 
@@ -491,5 +487,6 @@ if __name__ == "__main__":
         "debug_output": args.debug_output,
         "alpha_str": args.alpha,
         "eps_str": args.eps,
+        "joint_eval": args.joint_eval,
     }
     run_experiment(args.name, config_kwargs, advbench_pairs)

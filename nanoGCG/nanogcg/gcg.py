@@ -60,7 +60,9 @@ class GCGConfig:
     pgd_attack: bool = False
     gcg_attack: bool = True
     debug_output: bool = False
+    joint_eval: bool = False
     experiment_folder: str = "experiments/missing_folder"
+    images_folder: str = "experiments/missing_folder/images"
 
 
 @dataclass
@@ -239,7 +241,7 @@ class GCG:
         config = self.config
 
         # Create an images folder within the experiment folder.
-        images_folder = os.path.join(config.experiment_folder, "images")
+        images_folder = config.images_folder
         os.makedirs(images_folder, exist_ok=True)
 
         if config.seed is not None:
@@ -388,7 +390,7 @@ class GCG:
 
         for i in tqdm(range(config.num_steps)):
 
-            ### Compute token and image gradient
+            ### Compute token and image gradient - PHASE 1
             start_grad = time.perf_counter()
             if config.pgd_attack:
                 optim_ids_onehot_grad, image_grad = self.compute_gradient(
@@ -399,7 +401,9 @@ class GCG:
             grad_time = time.perf_counter() - start_grad
             gradient_times.append(grad_time)
             total_gradient_time += grad_time
+            ###
 
+            ###### PGD ATTACK (IN FIRST PLACE, BEFORE GCG)
             ### PGD update
             if config.pgd_attack:
                 start_pgd = time.perf_counter()
@@ -418,39 +422,24 @@ class GCG:
             else:
                 image = None
                 pgd_time = 0.0
-
-            if config.dynamic_search:
-                current_search_width = max(
-                    config.min_search_width,
-                    int(config.search_width * (1 - i / config.num_steps)),
-                )
-                logger.info(
-                    f"[Iteration {i}] Using dynamic search width: {current_search_width}"
+            ###
+            
+            ### Compute token and image gradient - PHASE 2
+            start_grad = time.perf_counter()
+            if config.pgd_attack:
+                optim_ids_onehot_grad, image_grad = self.compute_gradient(
+                    optim_ids, image
                 )
             else:
-                current_search_width = config.search_width
+                optim_ids_onehot_grad, _ = self.compute_gradient(optim_ids)
+            grad_time = time.perf_counter() - start_grad
+            gradient_times.append(grad_time)
+            total_gradient_time += grad_time
+            ###
 
+            ###### GCG ATTACK (IN SECOND PLACE HERE, AFTER PGD)
             ### Candidate sampling
-            if config.gcg_attack:
-                start_sample = time.perf_counter()
-                sampled_ids = sample_ids_from_grad(
-                    optim_ids.squeeze(0),
-                    optim_ids_onehot_grad.squeeze(0),
-                    current_search_width,
-                    config.topk,
-                    config.n_replace,
-                    not_allowed_ids=self.not_allowed_ids,
-                )
-                if config.filter_ids:
-                    sampled_ids = filter_ids(sampled_ids, tokenizer)
-                new_search_width = sampled_ids.shape[0]
-                sampling_time = time.perf_counter() - start_sample
-                sampling_times.append(sampling_time)
-                total_sampling_time += sampling_time
-            else:
-                sampled_ids = optim_ids
-                new_search_width = 1
-                sampling_time = 0.0
+            sampled_ids, new_search_width, sampling_time, total_sampling_time = self.candidate_sampling(config, i, optim_ids, optim_ids_onehot_grad, tokenizer, sampling_times, total_sampling_time)
 
             ### Candidate loss computation
             with torch.no_grad():
@@ -466,47 +455,78 @@ class GCG:
                         vision_feature_layer=-2,
                         vision_feature_select_strategy="default",
                     )
-                    # Candidate evaluation WITHOUT the image features:
-                    candidate_input_embeds = torch.cat(
-                        [
-                            self.before_img_embeds.repeat(new_search_width, 1, 1),
-                            # image_features.repeat(new_search_width, 1, 1),
-                            self.before_suffix_embeds.repeat(new_search_width, 1, 1),
-                            embedding_layer(sampled_ids),
-                            self.after_embeds.repeat(new_search_width, 1, 1),
-                            self.target_embeds.repeat(new_search_width, 1, 1),
-                        ],
-                        dim=1,
-                    )
-                    # Compute candidate losses without the image features
-                    loss = find_executable_batch_size(
-                        self._compute_candidates_loss_original, batch_size
-                    )(candidate_input_embeds)
                     
-                    best_loss_before_image = loss.min().item()
-                    best_idx = loss.argmin()
-                    logger.info(f"[Iteration {i}] Best loss before evaluation with image: {best_loss_before_image:.4f}")
-                    
-                    # Recompute the loss for the selected candidate including the image
-                    full_input_embeds = torch.cat(
-                        [
-                            self.before_img_embeds,
-                            image_features,
-                            self.before_suffix_embeds,
-                            embedding_layer(sampled_ids[best_idx].unsqueeze(0)),
-                            self.after_embeds,
-                            self.target_embeds,
-                        ],
-                        dim=1,
-                    )
-                    # Compute the full loss for the selected candidate (batch size = 1)
-                    full_loss = self._compute_candidates_loss_original(
-                        1, full_input_embeds
-                    )
-                    current_loss = full_loss.item()
-                    optim_ids = sampled_ids[best_idx].unsqueeze(0)
+                    if config.joint_eval: # If joint evaluation is enabled, evaluate all candidates with the image
+                        candidate_input_embeds = torch.cat(
+                            [
+                                self.before_img_embeds.repeat(new_search_width, 1, 1),
+                                image_features.repeat(new_search_width, 1, 1),
+                                self.before_suffix_embeds.repeat(new_search_width, 1, 1),
+                                embedding_layer(sampled_ids),
+                                self.after_embeds.repeat(new_search_width, 1, 1),
+                                self.target_embeds.repeat(new_search_width, 1, 1),
+                            ],
+                            dim=1,
+                        )
+                        
+                        # Compute candidate losses without the image features
+                        loss = find_executable_batch_size(
+                            self._compute_candidates_loss_original, batch_size
+                        )(candidate_input_embeds)
+                        
+                        best_loss_before_image = loss.min().item()
+                        best_idx = loss.argmin()
+
+                    else:     
+                        if config.gcg_attack: # Evaluate multiple candidates only when GCG is enabled -> There are multiple suffixes
+                            # Candidate evaluation WITHOUT the image features:
+                            candidate_input_embeds = torch.cat(
+                                [
+                                    self.before_img_embeds.repeat(new_search_width, 1, 1),
+                                    # image_features.repeat(new_search_width, 1, 1),
+                                    self.before_suffix_embeds.repeat(new_search_width, 1, 1),
+                                    embedding_layer(sampled_ids),
+                                    self.after_embeds.repeat(new_search_width, 1, 1),
+                                    self.target_embeds.repeat(new_search_width, 1, 1),
+                                ],
+                                dim=1,
+                            )
+                            # Compute candidate losses without the image features
+                            loss = find_executable_batch_size(
+                                self._compute_candidates_loss_original, batch_size
+                            )(candidate_input_embeds)
+                            
+                            best_loss_before_image = loss.min().item()
+                            best_idx = loss.argmin()
+                        else:
+                            # Loss compute for GCG suffixes is not needed when only PGD is enabled -> Directly compute final loss with image
+                            best_loss_before_image = 0.0
+                            best_idx = 0
+                        
+                        logger.info(f"[Iteration {i}] Best loss before evaluation with image: {best_loss_before_image:.4f}")
+                        
+                        # Compute final loss for the selected candidate with image
+                        full_input_embeds = torch.cat(
+                            [
+                                self.before_img_embeds,
+                                image_features,
+                                self.before_suffix_embeds,
+                                embedding_layer(sampled_ids[best_idx].unsqueeze(0)),
+                                self.after_embeds,
+                                self.target_embeds,
+                            ],
+                            dim=1,
+                        )
+                        # Compute the full loss for the selected candidate (batch size = 1)
+                        full_loss = self._compute_candidates_loss_original(
+                            1, full_input_embeds
+                        )
+                        current_loss = full_loss.item()
+                        optim_ids = sampled_ids[best_idx].unsqueeze(0)
+                        
+
                 else:
-                    # Normal case – build the embeddings as usual:
+                    # GCG without PGD case:
                     input_embeds = torch.cat(
                         [
                             self.before_embeds.repeat(new_search_width, 1, 1),
@@ -534,6 +554,8 @@ class GCG:
             optim_ids = buffer.get_best_ids()
             optim_str = tokenizer.batch_decode(optim_ids)[0]
             optim_strings.append(optim_str)
+            ###
+            ###### END GCG ATTACK
 
             ### Save image and debug output
             if config.pgd_attack:
@@ -715,6 +737,42 @@ class GCG:
         buffer.log_buffer(tokenizer)
         logger.info("Initialized attack buffer.")
         return buffer
+    
+    def candidate_sampling(self, config: GCGConfig, i, optim_ids, optim_ids_onehot_grad, tokenizer, sampling_times, total_sampling_time):
+        ### Candidate sampling
+        if config.dynamic_search:
+            current_search_width = max(
+                config.min_search_width,
+                int(config.search_width * (1 - i / config.num_steps)),
+            )
+            logger.info(
+                f"[Iteration {i}] Using dynamic search width: {current_search_width}"
+            )
+        else:
+            current_search_width = config.search_width
+
+        if config.gcg_attack:
+            start_sample = time.perf_counter()
+            sampled_ids = sample_ids_from_grad(
+                optim_ids.squeeze(0),
+                optim_ids_onehot_grad.squeeze(0),
+                current_search_width,
+                config.topk,
+                config.n_replace,
+                not_allowed_ids=self.not_allowed_ids,
+            )
+            if config.filter_ids:
+                sampled_ids = filter_ids(sampled_ids, tokenizer)
+            new_search_width = sampled_ids.shape[0]
+            sampling_time = time.perf_counter() - start_sample
+            sampling_times.append(sampling_time)
+            total_sampling_time += sampling_time
+        else:
+            sampled_ids = optim_ids
+            new_search_width = 1
+            sampling_time = 0.0
+            
+        return sampled_ids, new_search_width, sampling_time, total_sampling_time
 
     def compute_gradient(
         self, optim_ids: torch.Tensor, image: torch.Tensor = None
