@@ -3,7 +3,7 @@
 set -e
 
 # Joint evaluation of suffixes
-# CUDA_VISIBLE_DEVICES=0 python experiments.py \
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
 #     --name "Joint Evaluation" \
 #     --num_steps 250 \
 #     --search_width 512 \
@@ -18,7 +18,7 @@ set -e
 #     > experiments_joint.out 2>&1
 
 # # Dynamic Search Configuration
-# CUDA_VISIBLE_DEVICES=0 python experiments.py \
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
 #     --name "Dynamic Search 2" \
 #     --num_steps 250 \
 #     --search_width 512 \
@@ -33,7 +33,7 @@ set -e
 #     >experiments_dynamic_wout_image1.out 2>&1
 
 # # Base Configuration
-# CUDA_VISIBLE_DEVICES=0 python experiments.py \
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
 #     --name "Base Configuration 2" \
 #     --num_steps 250 \
 #     --search_width 512 \
@@ -48,7 +48,7 @@ set -e
 #     >experiments_base_wout_image2.out 2>&1
 
 # # GCG Only Configuration
-# CUDA_VISIBLE_DEVICES=0 python experiments.py \
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
 #     --name "GCG Only" \
 #     --num_steps 250 \
 #     --search_width 512 \
@@ -63,7 +63,7 @@ set -e
 #     >experiments_gcg.out 2>&1
 
 # # PGD Only Configuration
-# CUDA_VISIBLE_DEVICES=0 python experiments.py \
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
 #     --name "PGD Only 1" \
 #     --num_steps 600 \
 #     --search_width 0 \
@@ -77,21 +77,21 @@ set -e
 #     --joint_eval False \
 #     >experiments_pgd1.out 2>&1
 
-CUDA_VISIBLE_DEVICES=0 python experiments.py \
-    --name "PGD Only 2" \
-    --num_steps 600 \
-    --search_width 0 \
-    --dynamic_search False \
-    --min_search_width 0 \
-    --pgd_attack True \
-    --gcg_attack False \
-    --alpha "4/255" \
-    --eps "32/255" \
-    --debug_output False \
-    --joint_eval False \
-    >experiments_pgd2.out 2>&1
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
+#     --name "PGD Only 2" \
+#     --num_steps 600 \
+#     --search_width 0 \
+#     --dynamic_search False \
+#     --min_search_width 0 \
+#     --pgd_attack True \
+#     --gcg_attack False \
+#     --alpha "4/255" \
+#     --eps "32/255" \
+#     --debug_output False \
+#     --joint_eval False \
+#     >experiments_pgd2.out 2>&1
 
-# CUDA_VISIBLE_DEVICES=0 python experiments.py \
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
 #     --name "PGD Quick" \
 #     --num_steps 100 \
 #     --search_width 0 \
@@ -104,3 +104,70 @@ CUDA_VISIBLE_DEVICES=0 python experiments.py \
 #     --debug_output False \
 #     --joint_eval False \
 #     >experiments_pgd3.out 2>&1
+
+
+##### New Experiments #####
+
+# 1. Only PGD (GRADS -> PGD)
+CUDA_VISIBLE_DEVICES=4 python experiments.py \
+    --name "PGD Only" \
+    --num_steps 20 \
+    --search_width 0 \
+    --dynamic_search False \
+    --min_search_width 0 \
+    --pgd_attack True \
+    --gcg_attack False \
+    --pgd_after_gcg False \
+    --alpha "4/255" \
+    --eps "32/255" \
+    --debug_output False \
+    --joint_eval False \
+    > experiments_pgd.out 2>&1
+
+# # 2. Only GCG (GRADS -> GCG)
+CUDA_VISIBLE_DEVICES=4 python experiments.py \
+    --name "GCG Only" \
+    --num_steps 20 \
+    --search_width 256 \
+    --dynamic_search False \
+    --min_search_width 0 \
+    --pgd_attack False \
+    --gcg_attack True \
+    --pgd_after_gcg False \
+    --alpha "0/255" \
+    --eps "0/255" \
+    --debug_output False \
+    --joint_eval False \
+    > experiments_gcg.out 2>&1
+
+# 3. Both PGD and GCG (GRADS -> PGD -> GRADS -> GCG)
+CUDA_VISIBLE_DEVICES=4 python experiments.py \
+    --name "PGD + GCG" \
+    --num_steps 250 \
+    --search_width 256 \
+    --dynamic_search False \
+    --min_search_width 0 \
+    --pgd_attack True \
+    --gcg_attack True \
+    --pgd_after_gcg False \
+    --alpha "4/255" \
+    --eps "64/255" \
+    --debug_output True \
+    --joint_eval False \
+    > experiments_pgd_gcg.out 2>&1
+
+# 4. Both PGD and GCG with PGD after GCG (GRADS -> GCG -> GRADS -> PGD)
+CUDA_VISIBLE_DEVICES=4 python experiments.py \
+    --name "GCG + PGD" \
+    --num_steps 250 \
+    --search_width 256 \
+    --dynamic_search False \
+    --min_search_width 0 \
+    --pgd_attack True \
+    --gcg_attack True \
+    --pgd_after_gcg True \
+    --alpha "4/255" \
+    --eps "64/255" \
+    --debug_output True \
+    --joint_eval False \
+    > experiments_gcg_pgd.out 2>&1

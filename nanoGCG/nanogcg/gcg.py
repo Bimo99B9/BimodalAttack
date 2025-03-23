@@ -63,6 +63,7 @@ class GCGConfig:
     joint_eval: bool = False
     experiment_folder: str = "experiments/missing_folder"
     images_folder: str = "experiments/missing_folder/images"
+    pgd_after_gcg: bool = False
 
 
 @dataclass
@@ -248,6 +249,7 @@ class GCG:
             set_seed(config.seed)
             torch.use_deterministic_algorithms(True, warn_only=True)
 
+        # Process messages and add placeholder for optimization string.
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
         else:
@@ -296,6 +298,7 @@ class GCG:
             prompt = prompt.replace(tokenizer.bos_token, "")
         logger.info(f"Prompt after removing BOS token: {prompt}")
 
+        # Tokenize based on whether we have a PGD attack.
         if config.pgd_attack:
             before_img_str, after_img_str = prompt.split("<image>")
             before_suffix_str, after_str = after_img_str.split("{optim_str}")
@@ -334,16 +337,11 @@ class GCG:
 
         embedding_layer = self.embedding_layer
 
-        ### Embedding for before, after, and target
+        # Compute embeddings.
         if config.pgd_attack:
             before_img_embeds, before_suffix_embeds, after_embeds, target_embeds = [
                 embedding_layer(ids)
-                for ids in (
-                    before_img_ids,
-                    before_suffix_ids,
-                    after_ids,
-                    target_ids,
-                )
+                for ids in (before_img_ids, before_suffix_ids, after_ids, target_ids)
             ]
             self.before_img_ids = before_img_ids
             self.before_suffix_ids = before_suffix_ids
@@ -364,14 +362,13 @@ class GCG:
 
         ### Attack buffer initialization
         buffer = self.init_buffer(image)
-
         optim_ids = buffer.get_best_ids()
 
+        # Containers for metrics and outputs.
         losses = []
         optim_strings = []
         adv_suffixes = []
         model_outputs = []
-
         gradient_times = []
         sampling_times = []
         loss_times = []
@@ -388,9 +385,25 @@ class GCG:
             image.requires_grad = True
             image_original = image.clone()
 
-        for i in tqdm(range(config.num_steps)):
+        # Log the overall configuration.
+        if config.pgd_attack and config.gcg_attack:
+            if config.pgd_after_gcg:
+                logger.info(
+                    "Running GCG and PGD with PGD after GCG (GRADS -> GCG -> GRADS -> PGD)"
+                )
+            else:
+                logger.info("Running PGD and GCG (GRADS -> PGD -> GRADS -> GCG)")
+        elif config.pgd_attack and not config.gcg_attack:
+            logger.info("Running only PGD (GRADS -> PGD)")
+        elif config.gcg_attack and not config.pgd_attack:
+            logger.info("Running only GCG (GRADS -> GCG)")
 
-            ### Compute token and image gradient - PHASE 1
+        for i in tqdm(range(config.num_steps)):
+            logger.info(
+                f"[Iteration {i}] Starting iteration with config: pgd_attack={config.pgd_attack}, gcg_attack={config.gcg_attack}, pgd_after_gcg={config.pgd_after_gcg}"
+            )
+
+            ### Phase A - Initial gradient computation (GRADS)
             start_grad = time.perf_counter()
             if config.pgd_attack:
                 optim_ids_onehot_grad, image_grad = self.compute_gradient(
@@ -401,11 +414,13 @@ class GCG:
             grad_time = time.perf_counter() - start_grad
             gradient_times.append(grad_time)
             total_gradient_time += grad_time
-            ###
+            logger.info(
+                f"[Iteration {i}] Phase A (GRADS) completed in {grad_time:.4f}s"
+            )
 
-            ###### PGD ATTACK (IN FIRST PLACE, BEFORE GCG)
-            ### PGD update
-            if config.pgd_attack:
+            # Depending on ordering, either perform PGD update now (phases B & C) or skip them.
+            if config.pgd_attack and not config.pgd_after_gcg:
+                logger.info(f"[Iteration {i}] Running PGD before GCG (Phase B)")
                 start_pgd = time.perf_counter()
                 image = (
                     (image - config.alpha * config.eps * torch.sign(image_grad))
@@ -419,29 +434,46 @@ class GCG:
                 pgd_time = time.perf_counter() - start_pgd
                 pgd_times.append(pgd_time)
                 total_pgd_time += pgd_time
-            else:
-                image = None
-                pgd_time = 0.0
-            ###
-            
-            ### Compute token and image gradient - PHASE 2
-            start_grad = time.perf_counter()
-            if config.pgd_attack:
-                optim_ids_onehot_grad, image_grad = self.compute_gradient(
-                    optim_ids, image
+                logger.info(
+                    f"[Iteration {i}] Phase B (PGD update) completed in {pgd_time:.4f}s"
+                )
+
+                ### Phase C - Recompute gradient after PGD update.
+                if config.gcg_attack:
+                    start_grad = time.perf_counter()
+                    optim_ids_onehot_grad, image_grad = self.compute_gradient(
+                        optim_ids, image
+                    )
+                    grad_time = time.perf_counter() - start_grad
+                    gradient_times.append(grad_time)
+                    total_gradient_time += grad_time
+                    logger.info(
+                        f"[Iteration {i}] Phase C (Recompute GRADS) completed in {grad_time:.4f}s"
+                    )
+            elif config.pgd_after_gcg:
+                logger.info(
+                    f"[Iteration {i}] Skipping PGD update (B) and second GRADS (C) due to pgd_after_gcg flag; will perform PGD after GCG"
                 )
             else:
-                optim_ids_onehot_grad, _ = self.compute_gradient(optim_ids)
-            grad_time = time.perf_counter() - start_grad
-            gradient_times.append(grad_time)
-            total_gradient_time += grad_time
-            ###
+                pgd_time = 0.0
+                logger.info(
+                    f"[Iteration {i}] Skipping PGD update (B) and second GRADS (C) due to no PGD attack"
+                )
 
-            ###### GCG ATTACK (IN SECOND PLACE HERE, AFTER PGD)
-            ### Candidate sampling
-            sampled_ids, new_search_width, sampling_time, total_sampling_time = self.candidate_sampling(config, i, optim_ids, optim_ids_onehot_grad, tokenizer, sampling_times, total_sampling_time)
+            ### Phase D - GCG candidate sampling and (partial) loss computation.
+            logger.info(f"[Iteration {i}] Running GCG candidate sampling (Phase D)")
+            sampled_ids, new_search_width, sampling_time, total_sampling_time = (
+                self.candidate_sampling(
+                    config,
+                    i,
+                    optim_ids,
+                    optim_ids_onehot_grad,
+                    tokenizer,
+                    sampling_times,
+                    total_sampling_time,
+                )
+            )
 
-            ### Candidate loss computation
             with torch.no_grad():
                 start_loss = time.perf_counter()
                 batch_size = (
@@ -455,57 +487,117 @@ class GCG:
                         vision_feature_layer=-2,
                         vision_feature_select_strategy="default",
                     )
-                    
-                    if config.joint_eval: # If joint evaluation is enabled, evaluate all candidates with the image
-                        candidate_input_embeds = torch.cat(
-                            [
-                                self.before_img_embeds.repeat(new_search_width, 1, 1),
-                                image_features.repeat(new_search_width, 1, 1),
-                                self.before_suffix_embeds.repeat(new_search_width, 1, 1),
-                                embedding_layer(sampled_ids),
-                                self.after_embeds.repeat(new_search_width, 1, 1),
-                                self.target_embeds.repeat(new_search_width, 1, 1),
-                            ],
-                            dim=1,
-                        )
-                        
-                        # Compute candidate losses without the image features
-                        loss = find_executable_batch_size(
-                            self._compute_candidates_loss_original, batch_size
-                        )(candidate_input_embeds)
-                        
-                        best_loss_before_image = loss.min().item()
-                        best_idx = loss.argmin()
-
-                    else:     
-                        if config.gcg_attack: # Evaluate multiple candidates only when GCG is enabled -> There are multiple suffixes
-                            # Candidate evaluation WITHOUT the image features:
+                    if config.pgd_after_gcg:
+                        # In PGD-after-GCG mode: choose candidate now, but delay the full loss computation.
+                        if config.joint_eval:
                             candidate_input_embeds = torch.cat(
                                 [
-                                    self.before_img_embeds.repeat(new_search_width, 1, 1),
-                                    # image_features.repeat(new_search_width, 1, 1),
-                                    self.before_suffix_embeds.repeat(new_search_width, 1, 1),
+                                    self.before_img_embeds.repeat(
+                                        new_search_width, 1, 1
+                                    ),
+                                    image_features.repeat(new_search_width, 1, 1),
+                                    self.before_suffix_embeds.repeat(
+                                        new_search_width, 1, 1
+                                    ),
                                     embedding_layer(sampled_ids),
                                     self.after_embeds.repeat(new_search_width, 1, 1),
                                     self.target_embeds.repeat(new_search_width, 1, 1),
                                 ],
                                 dim=1,
                             )
-                            # Compute candidate losses without the image features
                             loss = find_executable_batch_size(
                                 self._compute_candidates_loss_original, batch_size
                             )(candidate_input_embeds)
-                            
                             best_loss_before_image = loss.min().item()
                             best_idx = loss.argmin()
                         else:
-                            # Loss compute for GCG suffixes is not needed when only PGD is enabled -> Directly compute final loss with image
-                            best_loss_before_image = 0.0
-                            best_idx = 0
-                        
-                        logger.info(f"[Iteration {i}] Best loss before evaluation with image: {best_loss_before_image:.4f}")
-                        
-                        # Compute final loss for the selected candidate with image
+                            if config.gcg_attack:
+                                candidate_input_embeds = torch.cat(
+                                    [
+                                        self.before_img_embeds.repeat(
+                                            new_search_width, 1, 1
+                                        ),
+                                        self.before_suffix_embeds.repeat(
+                                            new_search_width, 1, 1
+                                        ),
+                                        embedding_layer(sampled_ids),
+                                        self.after_embeds.repeat(
+                                            new_search_width, 1, 1
+                                        ),
+                                        self.target_embeds.repeat(
+                                            new_search_width, 1, 1
+                                        ),
+                                    ],
+                                    dim=1,
+                                )
+                                loss = find_executable_batch_size(
+                                    self._compute_candidates_loss_original, batch_size
+                                )(candidate_input_embeds)
+                                best_loss_before_image = loss.min().item()
+                                best_idx = loss.argmin()
+                            else:
+                                best_loss_before_image = 0.0
+                                best_idx = 0
+                        logger.info(
+                            f"[Iteration {i}] [GCG] Selected candidate index {best_idx} (pre-PGD update), loss before image evaluation: {best_loss_before_image:.4f}"
+                        )
+                        # Save the candidate for use after the PGD update.
+                        chosen_candidate = sampled_ids[best_idx].unsqueeze(0)
+                        # Do not set current_loss yet.
+                    else:
+                        # Normal PGD (or only PGD) case: compute full loss immediately.
+                        if config.joint_eval:
+                            candidate_input_embeds = torch.cat(
+                                [
+                                    self.before_img_embeds.repeat(
+                                        new_search_width, 1, 1
+                                    ),
+                                    image_features.repeat(new_search_width, 1, 1),
+                                    self.before_suffix_embeds.repeat(
+                                        new_search_width, 1, 1
+                                    ),
+                                    embedding_layer(sampled_ids),
+                                    self.after_embeds.repeat(new_search_width, 1, 1),
+                                    self.target_embeds.repeat(new_search_width, 1, 1),
+                                ],
+                                dim=1,
+                            )
+                            loss = find_executable_batch_size(
+                                self._compute_candidates_loss_original, batch_size
+                            )(candidate_input_embeds)
+                            best_loss_before_image = loss.min().item()
+                            best_idx = loss.argmin()
+                        else:
+                            if config.gcg_attack:
+                                candidate_input_embeds = torch.cat(
+                                    [
+                                        self.before_img_embeds.repeat(
+                                            new_search_width, 1, 1
+                                        ),
+                                        self.before_suffix_embeds.repeat(
+                                            new_search_width, 1, 1
+                                        ),
+                                        embedding_layer(sampled_ids),
+                                        self.after_embeds.repeat(
+                                            new_search_width, 1, 1
+                                        ),
+                                        self.target_embeds.repeat(
+                                            new_search_width, 1, 1
+                                        ),
+                                    ],
+                                    dim=1,
+                                )
+                                loss = find_executable_batch_size(
+                                    self._compute_candidates_loss_original, batch_size
+                                )(candidate_input_embeds)
+                                best_loss_before_image = loss.min().item()
+                                best_idx = loss.argmin()
+                            else:
+                                best_loss_before_image = 0.0
+                                best_idx = 0
+                        logger.info(
+                            f"[Iteration {i}] Best loss before evaluation with image: {best_loss_before_image:.4f}"
+                        )
                         full_input_embeds = torch.cat(
                             [
                                 self.before_img_embeds,
@@ -517,17 +609,23 @@ class GCG:
                             ],
                             dim=1,
                         )
-                        # Compute the full loss for the selected candidate (batch size = 1)
                         full_loss = self._compute_candidates_loss_original(
                             1, full_input_embeds
                         )
                         current_loss = full_loss.item()
                         optim_ids = sampled_ids[best_idx].unsqueeze(0)
-                        
 
-                else:
-                    # GCG without PGD case:
-                    input_embeds = torch.cat(
+                        losses.append(current_loss)
+                        optim_str = tokenizer.batch_decode(optim_ids)[0]
+                        optim_strings.append(optim_str)
+                        if buffer.size == 0 or current_loss < buffer.get_highest_loss():
+                            buffer.add(current_loss, optim_ids)
+
+                        logger.info(
+                            f"[Iteration {i}] Final loss with image and suffix: {current_loss:.4f}"
+                        )
+                else:  # GCG without PGD.
+                    candidate_input_embeds = torch.cat(
                         [
                             self.before_embeds.repeat(new_search_width, 1, 1),
                             embedding_layer(sampled_ids),
@@ -538,26 +636,106 @@ class GCG:
                     )
                     loss = find_executable_batch_size(
                         self._compute_candidates_loss_original, batch_size
-                    )(input_embeds)
+                    )(candidate_input_embeds)
                     current_loss = loss.min().item()
-                    optim_ids = sampled_ids[loss.argmin()].unsqueeze(0)
+                    best_idx = loss.argmin()
+                    optim_ids = sampled_ids[best_idx].unsqueeze(0)
 
-                logger.info(f"[Iteration {i}] Current loss: {current_loss:.4f}")
+                    losses.append(current_loss)
+                    optim_str = tokenizer.batch_decode(optim_ids)[0]
+                    optim_strings.append(optim_str)
+                    if buffer.size == 0 or current_loss < buffer.get_highest_loss():
+                        buffer.add(current_loss, optim_ids)
+
+                    logger.info(
+                        f"[Iteration {i}] Final loss with only suffix: {current_loss:.4f}"
+                    )
+
                 loss_time = time.perf_counter() - start_loss
                 loss_times.append(loss_time)
                 total_loss_time += loss_time
 
-                losses.append(current_loss)
-                if buffer.size == 0 or current_loss < buffer.get_highest_loss():
-                    buffer.add(current_loss, optim_ids)
+                if config.pgd_after_gcg:
+                    # For PGD-after-GCG mode, we delay final loss computation.
+                    losses.append(None)
+                    optim_strings.append("pending")
+            # End Phase D
 
-            optim_ids = buffer.get_best_ids()
-            optim_str = tokenizer.batch_decode(optim_ids)[0]
-            optim_strings.append(optim_str)
-            ###
-            ###### END GCG ATTACK
+            # If PGD is to run after GCG, do it here.
+            if config.pgd_after_gcg and config.pgd_attack:
+                logger.info(
+                    f"[Iteration {i}] Running PGD after GCG: computing gradient (Phase E)"
+                )
+                start_grad = time.perf_counter()
+                optim_ids_onehot_grad, image_grad = self.compute_gradient(
+                    optim_ids, image
+                )
+                grad_time = time.perf_counter() - start_grad
+                gradient_times.append(grad_time)
+                total_gradient_time += grad_time
+                logger.info(
+                    f"[Iteration {i}] Phase E (GRADS after GCG) completed in {grad_time:.4f}s"
+                )
 
-            ### Save image and debug output
+                logger.info(
+                    f"[Iteration {i}] Running PGD after GCG: PGD update (Phase F)"
+                )
+                start_pgd = time.perf_counter()
+                image = (
+                    (image - config.alpha * config.eps * torch.sign(image_grad))
+                    .detach()
+                    .requires_grad_()
+                )
+                image = torch.clamp(
+                    image, image_original - config.eps, image_original + config.eps
+                )
+                image = torch.clamp(image, 0, 1)
+                pgd_time = time.perf_counter() - start_pgd
+                pgd_times.append(pgd_time)
+                total_pgd_time += pgd_time
+                logger.info(
+                    f"[Iteration {i}] Phase F (PGD update after GCG) completed in {pgd_time:.4f}s"
+                )
+
+                # Final loss computation after PGD update.
+                with torch.no_grad():
+                    start_loss = time.perf_counter()
+                    pixel_values = self.normalize(image)
+                    image_features = model.get_image_features(
+                        pixel_values=pixel_values,
+                        vision_feature_layer=-2,
+                        vision_feature_select_strategy="default",
+                    )
+                    full_input_embeds = torch.cat(
+                        [
+                            self.before_img_embeds,
+                            image_features,
+                            self.before_suffix_embeds,
+                            embedding_layer(chosen_candidate),
+                            self.after_embeds,
+                            self.target_embeds,
+                        ],
+                        dim=1,
+                    )
+                    full_loss = self._compute_candidates_loss_original(
+                        1, full_input_embeds
+                    )
+                    current_loss = full_loss.item()
+                    optim_ids = chosen_candidate
+                    logger.info(
+                        f"[Iteration {i}] Final loss after [PGD after GCG]: {current_loss:.4f}"
+                    )
+                    loss_time = time.perf_counter() - start_loss
+                    loss_times.append(loss_time)
+                    total_loss_time += loss_time
+
+                    losses.append(current_loss)
+                    optim_str = tokenizer.batch_decode(optim_ids)[0]
+                    optim_strings.append(optim_str)
+                    if buffer.size == 0 or current_loss < buffer.get_highest_loss():
+                        buffer.add(current_loss, optim_ids)
+
+            # Save image and (optionally) generate debug output.
             if config.pgd_attack:
                 self._save_image(image, os.path.join(images_folder, f"{i}.png"))
             if config.debug_output and i % 10 == 0:
@@ -590,7 +768,6 @@ class GCG:
                             ],
                             dim=1,
                         )
-
                     generated_ids = model.generate(
                         inputs_embeds=input_embeds, max_new_tokens=150
                     )
@@ -601,22 +778,19 @@ class GCG:
             else:
                 gen_output = ""
             model_outputs.append(gen_output)
-            adv_suffixes.append(optim_str)
-
+            adv_suffixes.append(tokenizer.batch_decode(optim_ids)[0])
             buffer.log_buffer(tokenizer)
 
             if self.stop_flag:
                 logger.info("Early stopping due to finding a perfect match.")
                 break
 
-            # iter_total = time.perf_counter() - iter_start
-            iter_total = (
-                grad_time + sampling_time + pgd_time + loss_time
-            )  # Compute total iteration time based on individual times.
+            # Compute and log total iteration time.
+            iter_total = grad_time + sampling_time + pgd_time + loss_time
             total_times.append(iter_total)
-
             logger.info(
-                f"[Iteration {i}] Total iteration time: {iter_total:.4f}s (Gradient: {grad_time:.4f}s, Sampling: {sampling_time:.4f}s, PGD: {pgd_time:.4f}s, Loss: {loss_time:.4f}s)"
+                f"[Iteration {i}] Total iteration time: {iter_total:.4f}s "
+                f"(Gradient: {grad_time:.4f}s, Sampling: {sampling_time:.4f}s, PGD: {pgd_time:.4f}s, Loss: {loss_time:.4f}s)"
             )
 
         num_iters = i + 1
@@ -737,8 +911,17 @@ class GCG:
         buffer.log_buffer(tokenizer)
         logger.info("Initialized attack buffer.")
         return buffer
-    
-    def candidate_sampling(self, config: GCGConfig, i, optim_ids, optim_ids_onehot_grad, tokenizer, sampling_times, total_sampling_time):
+
+    def candidate_sampling(
+        self,
+        config: GCGConfig,
+        i,
+        optim_ids,
+        optim_ids_onehot_grad,
+        tokenizer,
+        sampling_times,
+        total_sampling_time,
+    ):
         ### Candidate sampling
         if config.dynamic_search:
             current_search_width = max(
@@ -771,7 +954,7 @@ class GCG:
             sampled_ids = optim_ids
             new_search_width = 1
             sampling_time = 0.0
-            
+
         return sampled_ids, new_search_width, sampling_time, total_sampling_time
 
     def compute_gradient(

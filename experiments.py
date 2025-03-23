@@ -27,7 +27,7 @@ os.makedirs("experiments", exist_ok=True)
 
 EXPERIMENT_SEED = 1
 USE_ALL_PROMPTS = False
-NUM_PROMPTS = 10
+NUM_PROMPTS = 20
 ADV_BENCH_FILE = "data/advbench/harmful_behaviors.csv"
 
 
@@ -469,6 +469,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--joint_eval", type=str2bool, required=True, help="Joint evaluation flag"
     )
+    
+    parser.add_argument(
+        "--pgd_after_gcg", type=str2bool, required=True, help="PGD after GCG flag"
+    )
 
     args = parser.parse_args()
 
@@ -488,5 +492,6 @@ if __name__ == "__main__":
         "alpha_str": args.alpha,
         "eps_str": args.eps,
         "joint_eval": args.joint_eval,
+        "pgd_after_gcg": args.pgd_after_gcg,
     }
     run_experiment(args.name, config_kwargs, advbench_pairs)
