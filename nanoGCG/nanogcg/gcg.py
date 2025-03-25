@@ -473,6 +473,9 @@ class GCG:
                     total_sampling_time,
                 )
             )
+            logger.info(
+                f"[Iteration {i}] Sampled {new_search_width} candidates in {sampling_time:.4f}s"
+            )
 
             with torch.no_grad():
                 start_loss = time.perf_counter()
@@ -654,11 +657,14 @@ class GCG:
                 loss_time = time.perf_counter() - start_loss
                 loss_times.append(loss_time)
                 total_loss_time += loss_time
+                logger.info(
+                    f"[Iteration {i}] Loss computation completed in {loss_time:.4f}s"
+                )
 
-                if config.pgd_after_gcg:
-                    # For PGD-after-GCG mode, we delay final loss computation.
-                    losses.append(None)
-                    optim_strings.append("pending")
+                # if config.pgd_after_gcg:
+                #     # For PGD-after-GCG mode, we delay final loss computation.
+                #     losses.append(None)
+                #     optim_strings.append("pending")
             # End Phase D
 
             # If PGD is to run after GCG, do it here.

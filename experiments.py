@@ -324,56 +324,39 @@ def run_experiment(name, config_kwargs, advbench_pairs):
     logging.info(f"Saved aggregated summary CSV to {summary_csv_path}")
 
     # Plot aggregated losses (one line per run)
-    plt.figure()
+    plt.figure(
+        figsize=(10, 6), dpi=200
+    )  # Increase figure size and DPI for higher resolution
     for i, loss_list in enumerate(all_losses):
-        plt.plot(loss_list, linestyle="-", label=f"Run {i+1}")
+        # Thinner lines for better visibility when there are many runs
+        plt.plot(loss_list, linestyle="-", linewidth=1, label=f"Run {i+1}")
+
     plt.xlabel("Iteration")
     plt.ylabel("Loss")
     plt.title(f"{name} (Aggregated)")
     ax = plt.gca()
+
     config_text = "\n".join(
         f"{k}: {v}" for k, v in config_kwargs.items() if not k.endswith("_str")
     )
     props = dict(boxstyle="round", facecolor="white", alpha=0.5)
+
+    # Move text box to top-right corner
     ax.text(
-        0.02,
-        0.98,
+        0.98,  # x-position (far right)
+        0.98,  # y-position (top)
         config_text,
         transform=ax.transAxes,
         fontsize=8,
         verticalalignment="top",
+        horizontalalignment="right",  # right-align the text
         bbox=props,
     )
+
     plot_filename = os.path.join(experiment_folder, "losses_aggregated.png")
     plt.savefig(plot_filename, bbox_inches="tight")
     plt.close()
     logging.info(f"Saved aggregated loss plot to {plot_filename}")
-
-
-def plot_losses(experiment_name, seed, config, losses, experiment_folder):
-    plt.figure()
-    plt.plot(losses, linestyle="-", label=f"Seed {seed}")
-    plt.xlabel("Iteration")
-    plt.ylabel("Loss")
-    plt.title(f"{experiment_name} (Seed {seed})")
-    ax = plt.gca()
-    config_text = "\n".join(
-        f"{k}: {v}" for k, v in config.items() if not k.endswith("_str")
-    )
-    props = dict(boxstyle="round", facecolor="white", alpha=0.5)
-    ax.text(
-        0.02,
-        0.98,
-        config_text,
-        transform=ax.transAxes,
-        fontsize=8,
-        verticalalignment="top",
-        bbox=props,
-    )
-    plot_filename = os.path.join(experiment_folder, f"losses_seed_{seed}.png")
-    plt.savefig(plot_filename, bbox_inches="tight")
-    plt.close()
-    logging.info(f"Saved loss plot to {plot_filename}")
 
 
 def write_parameters_csv(experiment_folder, config_kwargs, seed):
@@ -469,7 +452,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--joint_eval", type=str2bool, required=True, help="Joint evaluation flag"
     )
-    
+
     parser.add_argument(
         "--pgd_after_gcg", type=str2bool, required=True, help="PGD after GCG flag"
     )
