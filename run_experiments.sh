@@ -88,7 +88,7 @@ set -e
 
 # 6. Both PGD and GCG with 600 steps and normal search width.
 
-# CUDA_VISIBLE_DEVICES=5 python experiments.py \
+# CUDA_VISIBLE_DEVICES=0 python experiments.py \
 #     --name "PGD + GCG" \
 #     --num_steps 600 \
 #     --search_width 512 \
@@ -122,7 +122,7 @@ set -e
 
 # 8. Both PGD and GCG with 600 steps and not so lower search width with dynamic search
 
-CUDA_VISIBLE_DEVICES=0 python experiments.py \
+CUDA_VISIBLE_DEVICES=4 python experiments.py \
     --name "PGD + GCG" \
     --num_steps 600 \
     --search_width 128 \

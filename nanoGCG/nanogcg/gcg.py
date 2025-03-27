@@ -775,7 +775,7 @@ class GCG:
                             dim=1,
                         )
                     generated_ids = model.generate(
-                        inputs_embeds=input_embeds, max_new_tokens=150
+                        inputs_embeds=input_embeds, max_new_tokens=50
                     )
                     gen_output = tokenizer.decode(
                         generated_ids[0], skip_special_tokens=True
