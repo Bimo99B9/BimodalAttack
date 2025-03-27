@@ -198,50 +198,88 @@ class GCG:
             if config.allow_non_ascii
             else get_nonascii_toks(tokenizer, device=model.device)
         )
-
         self.stop_flag = False
 
         if model.dtype in (torch.float32, torch.float64):
             logger.warning(
-                f"Model is in {model.dtype}. Use a lower precision data type, if possible, for much faster optimization."
+                f"Model is in {model.dtype}. Use a lower precision data type for faster optimization."
             )
-
         if model.device == torch.device("cpu"):
             logger.warning(
                 "Model is on the CPU. Use a hardware accelerator for faster optimization."
             )
 
+        # Set chat template based on model type.
         if not hasattr(tokenizer, "chat_template") or not tokenizer.chat_template:
+            # if self.processor.__class__.__name__ == "Gemma3Processor":
+            #     gemma3_chat_template = (
+            #         "{{ bos_token }}\n"
+            #         "{%- if messages[0]['role'] == 'system' -%}\n"
+            #         "    {%- if messages[0]['content'] is string -%}\n"
+            #         "        {%- set first_user_prefix = messages[0]['content'] + '\n\n' -%}\n"
+            #         "    {%- else -%}\n"
+            #         "        {%- set first_user_prefix = messages[0]['content'][0]['text'] + '\n\n' -%}\n"
+            #         "    {%- endif -%}\n"
+            #         "    {%- set loop_messages = messages[1:] -%}\n"
+            #         "{%- else -%}\n"
+            #         '    {%- set first_user_prefix = "" -%}\n'
+            #         "    {%- set loop_messages = messages -%}\n"
+            #         "{%- endif -%}\n"
+            #         "{%- for message in loop_messages -%}\n"
+            #         "    {%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) -%}\n"
+            #         '        {{ raise_exception("Conversation roles must alternate user/assistant/user/assistant/...") }}\n'
+            #         "    {%- endif -%}\n"
+            #         "    {%- if (message['role'] == 'assistant') -%}\n"
+            #         '        {%- set role = "model" -%}\n'
+            #         "    {%- else -%}\n"
+            #         "        {%- set role = message['role'] -%}\n"
+            #         "    {%- endif -%}\n"
+            #         "    {{ '<start_of_turn>' + role + '\n' + (first_user_prefix if loop.first else \"\") }}\n"
+            #         "    {%- if message['content'] is string -%}\n"
+            #         "        {{ message['content'] | trim }}\n"
+            #         "    {%- elif message['content'] is iterable -%}\n"
+            #         "        {%- for item in message['content'] -%}\n"
+            #         "            {%- if item['type'] == 'image' -%}\n"
+            #         "                {{ '<start_of_image>' }}\n"
+            #         "            {%- elif item['type'] == 'text' -%}\n"
+            #         "                {{ item['text'] | trim }}\n"
+            #         "            {%- endif -%}\n"
+            #         "        {%- endfor -%}\n"
+            #         "    {%- else -%}\n"
+            #         '        {{ raise_exception("Invalid content type") }}\n'
+            #         "    {%- endif -%}\n"
+            #         "    {{ '<end_of_turn>\n' }}\n"
+            #         "{%- endfor -%}\n"
+            #         "{%- if add_generation_prompt -%}\n"
+            #         "    {{'<start_of_turn>model\n'}}\n"
+            #         "{%- endif -%}\n"
+            #     )
+            #     tokenizer.chat_template = gemma3_chat_template
+            #     self.processor.chat_template = gemma3_chat_template
             if config.pgd_attack:
                 logger.warning(
                     "Tokenizer does not have a chat template. Using custom chat template for GCG+PGD attack."
                 )
-                tokenizer.chat_template = (
-                    "USER: <image>\n"
-                    "{{ messages[0]['content'][0]['text'] }} \n"
-                    "ASSISTANT: "
-                )
-                self.processor.chat_template = tokenizer.chat_template
+                custom_template = "USER: <image>\n{{ messages[0]['content'][0]['text'] }} \nASSISTANT: "
+                tokenizer.chat_template = custom_template
+                self.processor.chat_template = custom_template
             else:
                 logger.warning(
                     "Tokenizer does not have a chat template. Using custom chat template for GCG only attack."
                 )
-                tokenizer.chat_template = (
+                custom_template = (
                     "{% for message in messages %}{{ message['content'] }}{% endfor %}"
                 )
-                self.processor.chat_template = tokenizer.chat_template
+                tokenizer.chat_template = custom_template
+                self.processor.chat_template = custom_template
 
     def run(
-        self,
-        messages: Union[str, List[dict]],
-        target: str,
-        image: Tensor = None,
+        self, messages: Union[str, List[dict]], target: str, image: torch.Tensor = None
     ) -> GCGResult:
         model = self.model
         tokenizer = self.tokenizer
         config = self.config
 
-        # Create an images folder within the experiment folder.
         images_folder = config.images_folder
         os.makedirs(images_folder, exist_ok=True)
 
@@ -249,22 +287,18 @@ class GCG:
             set_seed(config.seed)
             torch.use_deterministic_algorithms(True, warn_only=True)
 
-        # Process messages and add placeholder for optimization string.
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
         else:
             messages = copy.deepcopy(messages)
-
         logger.info(f"Messages 0: {messages}")
 
-        ### Chat template and tokenization setup
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
         else:
             messages = copy.deepcopy(messages)
             logger.info(f"Messages 1: {messages}")
 
-        # Append the {optim_str} placeholder if not already present.
         if (
             isinstance(messages[-1]["content"], str)
             and "{optim_str}" not in messages[-1]["content"]
@@ -272,7 +306,6 @@ class GCG:
             messages[-1]["content"] = messages[-1]["content"] + " {optim_str}"
             logger.info(f"Messages 2: {messages}")
 
-        # For PGD attack, convert the user message to a list with text and image elements.
         if config.pgd_attack:
             if isinstance(messages[-1]["content"], str):
                 messages[-1]["content"] = [
@@ -287,21 +320,46 @@ class GCG:
                     messages[-1]["content"].append({"type": "image"})
         logger.info(f"Messages 4: {messages}")
 
-        # Apply the chat template.
         prompt = self.processor.apply_chat_template(
             messages, add_generation_prompt=True
         )
         logger.info(f"Prompt after applying chat template: {prompt}")
 
-        # Remove BOS token if present.
         if tokenizer.bos_token and prompt.startswith(tokenizer.bos_token):
             prompt = prompt.replace(tokenizer.bos_token, "")
         logger.info(f"Prompt after removing BOS token: {prompt}")
 
-        # Tokenize based on whether we have a PGD attack.
         if config.pgd_attack:
-            before_img_str, after_img_str = prompt.split("<image>")
-            before_suffix_str, after_str = after_img_str.split("{optim_str}")
+            if self.processor.__class__.__name__ == "Gemma3Processor":
+                # Split the prompt on the {optim_str} placeholder.
+                before_str, after_temp = prompt.split("{optim_str}", 1)
+                # Now split after_temp on "<start_of_image>"
+                if "<start_of_image>" in after_temp:
+                    # Discard any text before the image token.
+                    _, after_temp = after_temp.split("<start_of_image>", 1)
+                    # Now split on "<end_of_turn>" to remove trailing generation prompt.
+                    if "<end_of_turn>" in after_temp:
+                        _, after_str = after_temp.split("<end_of_turn>", 1)
+                        after_str = after_str.strip()
+                    else:
+                        after_str = ""
+                else:
+                    raise ValueError(
+                        "Expected <start_of_image> token in Gemma PGD prompt."
+                    )
+                before_img_str = before_str.strip()
+                before_suffix_str = (
+                    ""  # No text between {optim_str} and the image token.
+                )
+            else:
+                if "<start_of_image>" in prompt:
+                    before_img_str, after_img_str = prompt.split("<start_of_image>", 1)
+                elif "<image>" in prompt:
+                    before_img_str, after_img_str = prompt.split("<image>", 1)
+                else:
+                    raise ValueError("No image token found in prompt for PGD attack")
+                before_suffix_str, after_str = after_img_str.split("{optim_str}", 1)
+
             logger.info(f"Before image str: {before_img_str}")
             logger.info(f"Before suffix str: {before_suffix_str}")
             logger.info(f"After str: {after_str}")
@@ -324,7 +382,6 @@ class GCG:
             logger.info(f"Before str: {before_str}")
             logger.info(f"After str: {after_str}")
             logger.info(f"Target: {target}")
-
             before_ids = tokenizer(before_str, padding=False, return_tensors="pt")[
                 "input_ids"
             ].to(model.device, torch.int64)
@@ -335,12 +392,11 @@ class GCG:
                 target, add_special_tokens=False, return_tensors="pt"
             )["input_ids"].to(model.device, torch.int64)
 
-        embedding_layer = self.embedding_layer
+        # embedding_layer = self.embedding_layer
 
-        # Compute embeddings.
         if config.pgd_attack:
             before_img_embeds, before_suffix_embeds, after_embeds, target_embeds = [
-                embedding_layer(ids)
+                self.embedding_layer(ids)
                 for ids in (before_img_ids, before_suffix_ids, after_ids, target_ids)
             ]
             self.before_img_ids = before_img_ids
@@ -353,7 +409,7 @@ class GCG:
             self.target_embeds = target_embeds
         else:
             before_embeds, after_embeds, target_embeds = [
-                embedding_layer(ids) for ids in (before_ids, after_ids, target_ids)
+                self.embedding_layer(ids) for ids in (before_ids, after_ids, target_ids)
             ]
             self.target_ids = target_ids
             self.before_embeds = before_embeds
@@ -487,27 +543,34 @@ class GCG:
                     pixel_values = self.normalize(image)
                     image_features = model.get_image_features(
                         pixel_values=pixel_values,
-                        vision_feature_layer=-2,
-                        vision_feature_select_strategy="default",
+                        # vision_feature_layer=-2,
+                        # vision_feature_select_strategy="default",
                     )
                     if config.pgd_after_gcg:
                         # In PGD-after-GCG mode: choose candidate now, but delay the full loss computation.
                         if config.joint_eval:
-                            candidate_input_embeds = torch.cat(
-                                [
-                                    self.before_img_embeds.repeat(
-                                        new_search_width, 1, 1
-                                    ),
-                                    image_features.repeat(new_search_width, 1, 1),
-                                    self.before_suffix_embeds.repeat(
-                                        new_search_width, 1, 1
-                                    ),
-                                    embedding_layer(sampled_ids),
-                                    self.after_embeds.repeat(new_search_width, 1, 1),
-                                    self.target_embeds.repeat(new_search_width, 1, 1),
-                                ],
-                                dim=1,
+                            # candidate_input_embeds = torch.cat(
+                            #     [
+                            #         self.before_img_embeds.repeat(
+                            #             new_search_width, 1, 1
+                            #         ),
+                            #         image_features.repeat(new_search_width, 1, 1),
+                            #         self.before_suffix_embeds.repeat(
+                            #             new_search_width, 1, 1
+                            #         ),
+                            #         embedding_layer(sampled_ids),
+                            #         self.after_embeds.repeat(new_search_width, 1, 1),
+                            #         self.target_embeds.repeat(new_search_width, 1, 1),
+                            #     ],
+                            #     dim=1,
+                            # )
+                            candidate_input_embeds = self._build_input_embeds_gcg_pgd(
+                                sampled_ids,
+                                image_features,
+                                search_width=new_search_width,
+                                single=True,
                             )
+
                             loss = find_executable_batch_size(
                                 self._compute_candidates_loss_original, batch_size
                             )(candidate_input_embeds)
@@ -515,24 +578,30 @@ class GCG:
                             best_idx = loss.argmin()
                         else:
                             if config.gcg_attack:
-                                candidate_input_embeds = torch.cat(
-                                    [
-                                        self.before_img_embeds.repeat(
-                                            new_search_width, 1, 1
-                                        ),
-                                        self.before_suffix_embeds.repeat(
-                                            new_search_width, 1, 1
-                                        ),
-                                        embedding_layer(sampled_ids),
-                                        self.after_embeds.repeat(
-                                            new_search_width, 1, 1
-                                        ),
-                                        self.target_embeds.repeat(
-                                            new_search_width, 1, 1
-                                        ),
-                                    ],
-                                    dim=1,
+                                # candidate_input_embeds = torch.cat(
+                                #     [
+                                #         self.before_img_embeds.repeat(
+                                #             new_search_width, 1, 1
+                                #         ),
+                                #         self.before_suffix_embeds.repeat(
+                                #             new_search_width, 1, 1
+                                #         ),
+                                #         embedding_layer(sampled_ids),
+                                #         self.after_embeds.repeat(
+                                #             new_search_width, 1, 1
+                                #         ),
+                                #         self.target_embeds.repeat(
+                                #             new_search_width, 1, 1
+                                #         ),
+                                #     ],
+                                #     dim=1,
+                                # )
+                                candidate_input_embeds = self._build_input_embeds_gcg(
+                                    sampled_ids,
+                                    search_width=new_search_width,
+                                    single=True,
                                 )
+
                                 loss = find_executable_batch_size(
                                     self._compute_candidates_loss_original, batch_size
                                 )(candidate_input_embeds)
@@ -550,21 +619,28 @@ class GCG:
                     else:
                         # Normal PGD (or only PGD) case: compute full loss immediately.
                         if config.joint_eval:
-                            candidate_input_embeds = torch.cat(
-                                [
-                                    self.before_img_embeds.repeat(
-                                        new_search_width, 1, 1
-                                    ),
-                                    image_features.repeat(new_search_width, 1, 1),
-                                    self.before_suffix_embeds.repeat(
-                                        new_search_width, 1, 1
-                                    ),
-                                    embedding_layer(sampled_ids),
-                                    self.after_embeds.repeat(new_search_width, 1, 1),
-                                    self.target_embeds.repeat(new_search_width, 1, 1),
-                                ],
-                                dim=1,
+                            # candidate_input_embeds = torch.cat(
+                            #     [
+                            #         self.before_img_embeds.repeat(
+                            #             new_search_width, 1, 1
+                            #         ),
+                            #         image_features.repeat(new_search_width, 1, 1),
+                            #         self.before_suffix_embeds.repeat(
+                            #             new_search_width, 1, 1
+                            #         ),
+                            #         embedding_layer(sampled_ids),
+                            #         self.after_embeds.repeat(new_search_width, 1, 1),
+                            #         self.target_embeds.repeat(new_search_width, 1, 1),
+                            #     ],
+                            #     dim=1,
+                            # )
+                            candidate_input_embeds = self._build_input_embeds_pgd(
+                                sampled_ids,
+                                image_features,
+                                search_width=new_search_width,
+                                single=True,
                             )
+
                             loss = find_executable_batch_size(
                                 self._compute_candidates_loss_original, batch_size
                             )(candidate_input_embeds)
@@ -572,24 +648,30 @@ class GCG:
                             best_idx = loss.argmin()
                         else:
                             if config.gcg_attack:
-                                candidate_input_embeds = torch.cat(
-                                    [
-                                        self.before_img_embeds.repeat(
-                                            new_search_width, 1, 1
-                                        ),
-                                        self.before_suffix_embeds.repeat(
-                                            new_search_width, 1, 1
-                                        ),
-                                        embedding_layer(sampled_ids),
-                                        self.after_embeds.repeat(
-                                            new_search_width, 1, 1
-                                        ),
-                                        self.target_embeds.repeat(
-                                            new_search_width, 1, 1
-                                        ),
-                                    ],
-                                    dim=1,
+                                # candidate_input_embeds = torch.cat(
+                                #     [
+                                #         self.before_img_embeds.repeat(
+                                #             new_search_width, 1, 1
+                                #         ),
+                                #         self.before_suffix_embeds.repeat(
+                                #             new_search_width, 1, 1
+                                #         ),
+                                #         embedding_layer(sampled_ids),
+                                #         self.after_embeds.repeat(
+                                #             new_search_width, 1, 1
+                                #         ),
+                                #         self.target_embeds.repeat(
+                                #             new_search_width, 1, 1
+                                #         ),
+                                #     ],
+                                #     dim=1,
+                                # )
+                                candidate_input_embeds = self._build_input_embeds_gcg(
+                                    sampled_ids,
+                                    search_width=new_search_width,
+                                    single=True,
                                 )
+
                                 loss = find_executable_batch_size(
                                     self._compute_candidates_loss_original, batch_size
                                 )(candidate_input_embeds)
@@ -601,17 +683,21 @@ class GCG:
                         logger.info(
                             f"[Iteration {i}] Best loss before evaluation with image: {best_loss_before_image:.4f}"
                         )
-                        full_input_embeds = torch.cat(
-                            [
-                                self.before_img_embeds,
-                                image_features,
-                                self.before_suffix_embeds,
-                                embedding_layer(sampled_ids[best_idx].unsqueeze(0)),
-                                self.after_embeds,
-                                self.target_embeds,
-                            ],
-                            dim=1,
+                        # full_input_embeds = torch.cat(
+                        #     [
+                        #         self.before_img_embeds,
+                        #         image_features,
+                        #         self.before_suffix_embeds,
+                        #         embedding_layer(sampled_ids[best_idx].unsqueeze(0)),
+                        #         self.after_embeds,
+                        #         self.target_embeds,
+                        #     ],
+                        #     dim=1,
+                        # )
+                        full_input_embeds = self._build_input_embeds_gcg_pgd(
+                            sampled_ids[best_idx].unsqueeze(0), image_features
                         )
+
                         full_loss = self._compute_candidates_loss_original(
                             1, full_input_embeds
                         )
@@ -628,15 +714,19 @@ class GCG:
                             f"[Iteration {i}] Final loss with image and suffix: {current_loss:.4f}"
                         )
                 else:  # GCG without PGD.
-                    candidate_input_embeds = torch.cat(
-                        [
-                            self.before_embeds.repeat(new_search_width, 1, 1),
-                            embedding_layer(sampled_ids),
-                            self.after_embeds.repeat(new_search_width, 1, 1),
-                            self.target_embeds.repeat(new_search_width, 1, 1),
-                        ],
-                        dim=1,
-                    )
+                    # candidate_input_embeds = torch.cat(
+                    #     [
+                    #         self.before_embeds.repeat(new_search_width, 1, 1),
+                    #         embedding_layer(sampled_ids),
+                    #         self.after_embeds.repeat(new_search_width, 1, 1),
+                    #         self.target_embeds.repeat(new_search_width, 1, 1),
+                    #     ],
+                    #     dim=1,
+                    # )
+                    candidate_input_embeds = self._build_input_embeds_gcg(
+                        sampled_ids, search_width=new_search_width, no_joint_eval=True
+                    )  # TODO: Remove no_joint_eval flag, shouldn't be necessary.
+
                     loss = find_executable_batch_size(
                         self._compute_candidates_loss_original, batch_size
                     )(candidate_input_embeds)
@@ -709,20 +799,24 @@ class GCG:
                     pixel_values = self.normalize(image)
                     image_features = model.get_image_features(
                         pixel_values=pixel_values,
-                        vision_feature_layer=-2,
-                        vision_feature_select_strategy="default",
+                        # vision_feature_layer=-2,
+                        # vision_feature_select_strategy="default",
                     )
-                    full_input_embeds = torch.cat(
-                        [
-                            self.before_img_embeds,
-                            image_features,
-                            self.before_suffix_embeds,
-                            embedding_layer(chosen_candidate),
-                            self.after_embeds,
-                            self.target_embeds,
-                        ],
-                        dim=1,
+                    # full_input_embeds = torch.cat(
+                    #     [
+                    #         self.before_img_embeds,
+                    #         image_features,
+                    #         self.before_suffix_embeds,
+                    #         embedding_layer(chosen_candidate),
+                    #         self.after_embeds,
+                    #         self.target_embeds,
+                    #     ],
+                    #     dim=1,
+                    # )
+                    full_input_embeds = self._build_input_embeds_gcg_pgd(
+                        chosen_candidate, image_features
                     )
+
                     full_loss = self._compute_candidates_loss_original(
                         1, full_input_embeds
                     )
@@ -750,32 +844,43 @@ class GCG:
                         pixel_values = self.normalize(image)
                         image_features = model.get_image_features(
                             pixel_values=pixel_values,
-                            vision_feature_layer=-2,
-                            vision_feature_select_strategy="default",
+                            # vision_feature_layer=-2,
+                            # vision_feature_select_strategy="default",
                         )
-                        input_embeds = torch.cat(
-                            [
-                                self.before_img_embeds.repeat(new_search_width, 1, 1),
-                                image_features.repeat(new_search_width, 1, 1),
-                                self.before_suffix_embeds.repeat(
-                                    new_search_width, 1, 1
-                                ),
-                                embedding_layer(sampled_ids),
-                                self.after_embeds.repeat(new_search_width, 1, 1),
-                            ],
-                            dim=1,
+                        # input_embeds = torch.cat(
+                        #     [
+                        #         self.before_img_embeds.repeat(new_search_width, 1, 1),
+                        #         image_features.repeat(new_search_width, 1, 1),
+                        #         self.before_suffix_embeds.repeat(
+                        #             new_search_width, 1, 1
+                        #         ),
+                        #         embedding_layer(sampled_ids),
+                        #         self.after_embeds.repeat(new_search_width, 1, 1),
+                        #     ],
+                        #     dim=1,
+                        # )
+                        input_embeds = self._build_input_embeds_gcg_pgd(
+                            sampled_ids,
+                            image_features,
+                            search_width=new_search_width,
+                            no_target=True,
                         )
+
                     else:
-                        input_embeds = torch.cat(
-                            [
-                                self.before_embeds.repeat(new_search_width, 1, 1),
-                                embedding_layer(sampled_ids),
-                                self.after_embeds.repeat(new_search_width, 1, 1),
-                            ],
-                            dim=1,
+                        # input_embeds = torch.cat(
+                        #     [
+                        #         self.before_embeds.repeat(new_search_width, 1, 1),
+                        #         embedding_layer(sampled_ids),
+                        #         self.after_embeds.repeat(new_search_width, 1, 1),
+                        #     ],
+                        #     dim=1,
+                        # )
+                        input_embeds = self._build_input_embeds_gcg(
+                            sampled_ids, search_width=new_search_width, no_target=True
                         )
+
                     generated_ids = model.generate(
-                        inputs_embeds=input_embeds, max_new_tokens=50
+                        inputs_embeds=input_embeds, max_new_tokens=40
                     )
                     gen_output = tokenizer.decode(
                         generated_ids[0], skip_special_tokens=True
@@ -882,29 +987,38 @@ class GCG:
             pixel_values = self.normalize(image)
             image_features = model.get_image_features(
                 pixel_values=pixel_values,
-                vision_feature_layer=-2,
-                vision_feature_select_strategy="default",
+                # vision_feature_layer=-2,
+                # vision_feature_select_strategy="default",
             )
-            init_buffer_embeds = torch.cat(
-                [
-                    self.before_img_embeds.repeat(true_buffer_size, 1, 1),
-                    image_features.repeat(true_buffer_size, 1, 1),
-                    self.before_suffix_embeds.repeat(true_buffer_size, 1, 1),
-                    self.embedding_layer(init_buffer_ids),
-                    self.after_embeds.repeat(true_buffer_size, 1, 1),
-                    self.target_embeds.repeat(true_buffer_size, 1, 1),
-                ],
-                dim=1,
+            # init_buffer_embeds = torch.cat(
+            #     [
+            #         self.before_img_embeds.repeat(true_buffer_size, 1, 1),
+            #         image_features.repeat(true_buffer_size, 1, 1),
+            #         self.before_suffix_embeds.repeat(true_buffer_size, 1, 1),
+            #         self.embedding_layer(init_buffer_ids),
+            #         self.after_embeds.repeat(true_buffer_size, 1, 1),
+            #         self.target_embeds.repeat(true_buffer_size, 1, 1),
+            #     ],
+            #     dim=1,
+            # )
+            init_buffer_embeds = self._build_input_embeds_gcg_pgd(
+                init_buffer_ids,
+                image_features,
+                search_width=true_buffer_size,
+                single=True,
             )
         else:
-            init_buffer_embeds = torch.cat(
-                [
-                    self.before_embeds.repeat(true_buffer_size, 1, 1),
-                    self.embedding_layer(init_buffer_ids),
-                    self.after_embeds.repeat(true_buffer_size, 1, 1),
-                    self.target_embeds.repeat(true_buffer_size, 1, 1),
-                ],
-                dim=1,
+            # init_buffer_embeds = torch.cat(
+            #     [
+            #         self.before_embeds.repeat(true_buffer_size, 1, 1),
+            #         self.embedding_layer(init_buffer_ids),
+            #         self.after_embeds.repeat(true_buffer_size, 1, 1),
+            #         self.target_embeds.repeat(true_buffer_size, 1, 1),
+            #     ],
+            #     dim=1,
+            # )
+            self._build_input_embeds_gcg(
+                init_buffer_ids, search_width=true_buffer_size, no_joint_eval=True
             )
 
         ## Initial buffer loss computation
@@ -984,8 +1098,8 @@ class GCG:
             pixel_values = self.normalize(image)
             image_features = model.get_image_features(
                 pixel_values=pixel_values,
-                vision_feature_layer=-2,
-                vision_feature_select_strategy="default",
+                # vision_feature_layer=-2,
+                # vision_feature_select_strategy="default",
             )
             input_embeds = torch.cat(
                 [
@@ -997,7 +1111,7 @@ class GCG:
                     self.target_embeds,
                 ],
                 dim=1,
-            )
+            )  # TODO: Move this to a function
         else:
             input_embeds = torch.cat(
                 [
@@ -1007,7 +1121,7 @@ class GCG:
                     self.target_embeds,
                 ],
                 dim=1,
-            )
+            )  # TODO: Move this to a function
 
         output = model(inputs_embeds=input_embeds)
         logits = output.logits
@@ -1035,6 +1149,115 @@ class GCG:
             else:
                 optim_ids_onehot_grad = None
             return optim_ids_onehot_grad, None
+
+    def _build_input_embeds_pgd(
+        self,
+        sampled_ids: Tensor,
+        image: Tensor,
+        search_width: int,
+        single: bool = False,
+    ) -> Tensor:
+        if single:
+            return torch.cat(
+                [
+                    self.before_img_embeds.repeat(search_width, 1, 1),
+                    image.repeat(search_width, 1, 1),
+                    self.before_suffix_embeds.repeat(search_width, 1, 1),
+                    self.embedding_layer(sampled_ids),
+                    self.after_embeds.repeat(search_width, 1, 1),
+                    self.target_embeds.repeat(search_width, 1, 1),
+                ],
+                dim=1,
+            )
+
+    def _build_input_embeds_gcg(
+        self,
+        sampled_ids: Tensor,
+        search_width: int,
+        single: bool = False,
+        no_joint_eval: bool = False,
+        no_target: bool = False,
+    ) -> Tensor:
+
+        if single:
+            return torch.cat(
+                [
+                    self.before_img_embeds.repeat(search_width, 1, 1),
+                    self.before_suffix_embeds.repeat(search_width, 1, 1),
+                    self.embedding_layer(sampled_ids),
+                    self.after_embeds.repeat(search_width, 1, 1),
+                    self.target_embeds.repeat(search_width, 1, 1),
+                ],
+                dim=1,
+            )
+
+        if no_joint_eval:
+            return torch.cat(
+                [
+                    self.before_embeds.repeat(search_width, 1, 1),
+                    self.embedding_layer(sampled_ids),
+                    self.after_embeds.repeat(search_width, 1, 1),
+                    self.target_embeds.repeat(search_width, 1, 1),
+                ],
+                dim=1,
+            )
+
+        if no_target:
+            return torch.cat(
+                [
+                    self.before_embeds.repeat(search_width, 1, 1),
+                    self.embedding_layer(sampled_ids),
+                    self.after_embeds.repeat(search_width, 1, 1),
+                ],
+                dim=1,
+            )
+
+    def _build_input_embeds_gcg_pgd(
+        self,
+        sampled_ids: Tensor,
+        image: Tensor,
+        search_width=None,
+        single: bool = False,
+        no_target: bool = False,
+    ) -> Tensor:
+
+        if single:
+            return torch.cat(
+                [
+                    self.before_img_embeds.repeat(search_width, 1, 1),
+                    image.repeat(search_width, 1, 1),
+                    self.before_suffix_embeds.repeat(search_width, 1, 1),
+                    self.embedding_layer(sampled_ids),
+                    self.after_embeds.repeat(search_width, 1, 1),
+                    self.target_embeds.repeat(search_width, 1, 1),
+                ],
+                dim=1,
+            )
+
+        elif no_target:
+            return torch.cat(
+                [
+                    self.before_img_embeds.repeat(search_width, 1, 1),
+                    image.repeat(search_width, 1, 1),
+                    self.before_suffix_embeds.repeat(search_width, 1, 1),
+                    self.embedding_layer(sampled_ids),
+                    self.after_embeds.repeat(search_width, 1, 1),
+                ],
+                dim=1,
+            )
+
+        else:
+            return torch.cat(
+                [
+                    self.before_img_embeds,
+                    image,
+                    self.before_suffix_embeds,
+                    self.embedding_layer(sampled_ids),
+                    self.after_embeds,
+                    self.target_embeds,
+                ],
+                dim=1,
+            )
 
     def _compute_candidates_loss_original(
         self, search_batch_size: int, input_embeds: Tensor

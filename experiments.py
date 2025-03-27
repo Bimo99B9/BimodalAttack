@@ -14,7 +14,18 @@ import os
 import csv
 import matplotlib.pyplot as plt
 
-from transformers import AutoProcessor, LlavaForConditionalGeneration
+from utils.experiments_utils import (
+    load_advbench_dataset,
+    get_experiment_folder,
+    get_images_folder,
+    write_parameters_csv,
+)
+
+from transformers import (
+    AutoProcessor,
+    LlavaForConditionalGeneration,
+    Gemma3ForConditionalGeneration,
+)
 import torchvision.transforms as T
 from PIL import Image
 
@@ -27,8 +38,13 @@ os.makedirs("experiments", exist_ok=True)
 
 EXPERIMENT_SEED = 1
 USE_ALL_PROMPTS = False
-NUM_PROMPTS = 20
+NUM_PROMPTS = 5
 ADV_BENCH_FILE = "data/advbench/harmful_behaviors.csv"
+
+# Load and optionally slice the dataset
+advbench_pairs = load_advbench_dataset(ADV_BENCH_FILE)
+if not USE_ALL_PROMPTS:
+    advbench_pairs = advbench_pairs[:NUM_PROMPTS]
 
 
 def set_global_seed(seed):
@@ -39,17 +55,29 @@ def set_global_seed(seed):
 
 
 def load_model_and_processor(model_id):
-    model = LlavaForConditionalGeneration.from_pretrained(
-        model_id,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        attn_implementation="flash_attention_2",
-    ).to("cuda")
-    processor = AutoProcessor.from_pretrained(model_id)
+    if model_id == "llava-hf/llava-1.5-7b-hf":
+        model = LlavaForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+            attn_implementation="flash_attention_2",
+        ).to("cuda")
+        processor = AutoProcessor.from_pretrained(model_id)
+    elif model_id == "google/gemma-3-4b-it":
+        model = Gemma3ForConditionalGeneration.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16, device_map="auto"
+        )
+        model.eval()
+        processor = AutoProcessor.from_pretrained(model_id)
+    else:
+        raise ValueError(f"Model {model_id} not supported.")
     return model, processor
 
 
-MODEL_ID = "llava-hf/llava-1.5-7b-hf"
+# Choose model ID. (To use Gemma 3, set MODEL_ID to "google/gemma-3-4b-it")
+# MODEL_ID = "llava-hf/llava-1.5-7b-hf"
+# For testing Gemma 3 uncomment the following line:
+MODEL_ID = "google/gemma-3-4b-it"
 model, processor = load_model_and_processor(MODEL_ID)
 
 if MODEL_ID == "llava-hf/llava-1.5-7b-hf":
@@ -66,59 +94,26 @@ if MODEL_ID == "llava-hf/llava-1.5-7b-hf":
         std=[0.26862954, 0.26130258, 0.27577711],
     )
     tokenizer = processor.tokenizer
+elif MODEL_ID == "google/gemma-3-4b-it":
+    transform = T.Compose(
+        [
+            T.Lambda(lambda img: img.convert("RGB")),
+            T.Resize((896, 896), interpolation=T.InterpolationMode.BICUBIC),
+            T.CenterCrop((896, 896)),
+            T.ToTensor(),
+        ]
+    )
+    normalize = T.Normalize(
+        mean=[0.5, 0.5, 0.5],
+        std=[0.5, 0.5, 0.5],
+    )
+    tokenizer = processor.tokenizer
 else:
     raise ValueError(f"Model {MODEL_ID} not supported.")
-
-
-# --- Load advbench dataset ---
-def load_advbench_dataset(filepath):
-    pairs = []
-    with open(filepath, newline="", encoding="utf-8") as csvfile:
-        reader = csv.DictReader(csvfile)
-        for row in reader:
-            pairs.append((row["goal"], row["target"]))
-    return pairs
-
-
-# Load and optionally slice the dataset
-advbench_pairs = load_advbench_dataset(ADV_BENCH_FILE)
-if not USE_ALL_PROMPTS:
-    advbench_pairs = advbench_pairs[:NUM_PROMPTS]
 
 image_file = "http://images.cocodataset.org/val2017/000000039769.jpg"
 raw_image = Image.open(requests.get(image_file, stream=True).raw).convert("RGB")
 image = transform(raw_image).unsqueeze(0).to(model.device)
-
-
-# --- Folder helper functions ---
-
-
-def get_experiment_folder():
-    base_dir = "experiments"
-    existing_experiments = [
-        d
-        for d in os.listdir(base_dir)
-        if os.path.isdir(os.path.join(base_dir, d)) and d.startswith("exp")
-    ]
-    max_num = 0
-    for d in existing_experiments:
-        try:
-            num = int(d[3:])
-            if num > max_num:
-                max_num = num
-        except ValueError:
-            continue
-    new_exp_num = max_num + 1
-    experiment_folder_name = f"exp{new_exp_num}"
-    experiment_folder = os.path.join(base_dir, experiment_folder_name)
-    os.makedirs(experiment_folder, exist_ok=True)
-    return experiment_folder
-
-
-def get_images_folder(experiment_folder, pair_number):
-    images_folder = os.path.join(experiment_folder, f"images_{pair_number}")
-    os.makedirs(images_folder, exist_ok=True)
-    return images_folder
 
 
 # --- Run experiments across multiple (goal, target) pairs ---
@@ -216,8 +211,6 @@ def run_experiment(name, config_kwargs, advbench_pairs):
         all_details.append((result.adversarial_suffixes, result.model_outputs))
 
     # --- Write aggregated CSV files ---
-
-    # Losses CSV: one column per run
     losses_csv_path = os.path.join(experiment_folder, "losses.csv")
     with open(losses_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -231,7 +224,6 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             writer.writerow(row)
     logging.info(f"Saved aggregated losses CSV to {losses_csv_path}")
 
-    # Details CSV: two columns per run (Suffix and Output)
     details_csv_path = os.path.join(experiment_folder, "details.csv")
     with open(details_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -249,7 +241,6 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             writer.writerow(row)
     logging.info(f"Saved aggregated details CSV to {details_csv_path}")
 
-    # Times CSV: one set of time columns per run
     times_csv_path = os.path.join(experiment_folder, "times.csv")
     with open(times_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -281,17 +272,14 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             writer.writerow(row)
     logging.info(f"Saved aggregated times CSV to {times_csv_path}")
 
-    # Save experiment parameters
-    write_parameters_csv(experiment_folder, config_kwargs, EXPERIMENT_SEED)
+    write_parameters_csv(experiment_folder, config_kwargs, EXPERIMENT_SEED, name)
 
-    # Save all best strings to a file
     best_strings_path = os.path.join(experiment_folder, "best_strings.txt")
     with open(best_strings_path, "w") as f:
         for i, s in enumerate(all_best_strings):
             f.write(f"Run {i+1}: {s}\n")
     logging.info(f"Saved best strings to {best_strings_path}")
 
-    # Summary CSV: overall statistics aggregated across runs
     summary_csv_path = os.path.join(experiment_folder, "summary.csv")
     with open(summary_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -323,12 +311,8 @@ def run_experiment(name, config_kwargs, advbench_pairs):
         writer.writerow(["Std Total Time", std_total])
     logging.info(f"Saved aggregated summary CSV to {summary_csv_path}")
 
-    # Plot aggregated losses (one line per run)
-    plt.figure(
-        figsize=(10, 6), dpi=200
-    )  # Increase figure size and DPI for higher resolution
+    plt.figure(figsize=(10, 6), dpi=200)
     for i, loss_list in enumerate(all_losses):
-        # Thinner lines for better visibility when there are many runs
         plt.plot(loss_list, linestyle="-", linewidth=1, label=f"Run {i+1}")
 
     plt.xlabel("Iteration")
@@ -341,15 +325,14 @@ def run_experiment(name, config_kwargs, advbench_pairs):
     )
     props = dict(boxstyle="round", facecolor="white", alpha=0.5)
 
-    # Move text box to top-right corner
     ax.text(
-        0.98,  # x-position (far right)
-        0.98,  # y-position (top)
+        0.98,
+        0.98,
         config_text,
         transform=ax.transAxes,
         fontsize=8,
         verticalalignment="top",
-        horizontalalignment="right",  # right-align the text
+        horizontalalignment="right",
         bbox=props,
     )
 
@@ -357,30 +340,6 @@ def run_experiment(name, config_kwargs, advbench_pairs):
     plt.savefig(plot_filename, bbox_inches="tight")
     plt.close()
     logging.info(f"Saved aggregated loss plot to {plot_filename}")
-
-
-def write_parameters_csv(experiment_folder, config_kwargs, seed):
-    parameters_csv_path = os.path.join(experiment_folder, "parameters.csv")
-    with open(parameters_csv_path, "w", newline="") as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(["Parameter", "Value"])
-        for key, value in config_kwargs.items():
-            if key == "alpha":
-                if "alpha_str" in config_kwargs:
-                    writer.writerow(["alpha", config_kwargs["alpha_str"]])
-                else:
-                    writer.writerow([key, value])
-            elif key == "eps":
-                if "eps_str" in config_kwargs:
-                    writer.writerow(["eps", config_kwargs["eps_str"]])
-                else:
-                    writer.writerow([key, value])
-            elif key.endswith("_str"):
-                continue
-            else:
-                writer.writerow([key, value])
-        writer.writerow(["seed", seed])
-    logging.info(f"Saved parameters CSV to {parameters_csv_path}")
 
 
 def fraction_type(s):
@@ -452,11 +411,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--joint_eval", type=str2bool, required=True, help="Joint evaluation flag"
     )
-
     parser.add_argument(
         "--pgd_after_gcg", type=str2bool, required=True, help="PGD after GCG flag"
     )
-
     args = parser.parse_args()
 
     alpha_float = fraction_type(args.alpha)
