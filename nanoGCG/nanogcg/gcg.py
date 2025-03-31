@@ -65,7 +65,7 @@ def parse_conversation(prompt, output):
     """
     result = [
         {"role": "user", "content": prompt},
-        {"role": "assistant", "content": output},
+        {"role": "assistant", "content": output.strip()},
     ]
     
     logger.info(f"Parsed conversation for LlamaGuard: {result}")
@@ -294,13 +294,13 @@ class GCG:
                 self.processor.chat_template = custom_template
 
     def run(
-        self, messages: Union[str, List[dict]], target: str, image: torch.Tensor = None
+        self, messages: Union[str, List[dict]], goal: str, target: str, image: torch.Tensor = None
     ) -> GCGResult:
         model = self.model
         tokenizer = self.tokenizer
         config = self.config
-        
-        self.initial_prompt = messages
+
+        self.initial_prompt = goal
 
         images_folder = config.images_folder
         os.makedirs(images_folder, exist_ok=True)
@@ -457,6 +457,11 @@ class GCG:
         total_pgd_time = 0.0
 
         llama_guard_found_unsafe = False
+
+        # Initialize variables to track the best candidate (lowest loss).
+        best_loss = float("inf")
+        best_optim_ids = None
+        best_image = None
 
         if config.pgd_attack:
             logger.warning(f"Using alpha: {config.alpha}, eps: {config.eps}")
@@ -650,6 +655,11 @@ class GCG:
                         optim_strings.append(optim_str)
                         if buffer.size == 0 or current_loss < buffer.get_highest_loss():
                             buffer.add(current_loss, optim_ids)
+                        # Update best candidate if this loss is the lowest so far.
+                        if current_loss < best_loss:
+                            best_loss = current_loss
+                            best_optim_ids = optim_ids.clone()
+                            best_image = image.clone()
 
                         logger.info(
                             f"[Iteration {i}] Final loss with image and suffix: {current_loss:.4f}"
@@ -670,6 +680,10 @@ class GCG:
                     optim_strings.append(optim_str)
                     if buffer.size == 0 or current_loss < buffer.get_highest_loss():
                         buffer.add(current_loss, optim_ids)
+                    # Update best candidate (no image available in non-PGD mode).
+                    if current_loss < best_loss:
+                        best_loss = current_loss
+                        best_optim_ids = optim_ids.clone()
 
                     logger.info(
                         f"[Iteration {i}] Final loss with only suffix: {current_loss:.4f}"
@@ -747,6 +761,11 @@ class GCG:
                     optim_strings.append(optim_str)
                     if buffer.size == 0 or current_loss < buffer.get_highest_loss():
                         buffer.add(current_loss, optim_ids)
+                    # Also update best candidate if needed.
+                    if current_loss < best_loss:
+                        best_loss = current_loss
+                        best_optim_ids = optim_ids.clone()
+                        best_image = image.clone()
 
             # Save image and (optionally) generate debug output.
             if config.pgd_attack:
@@ -770,7 +789,7 @@ class GCG:
                         )
 
                     generated_ids = model.generate(
-                        inputs_embeds=input_embeds, max_new_tokens=40
+                        inputs_embeds=input_embeds, max_new_tokens=120
                     )
                     gen_output = tokenizer.decode(
                         generated_ids[0], skip_special_tokens=True
@@ -821,18 +840,47 @@ class GCG:
             f"Average candidate loss computation time: {total_loss_time / num_iters:.4f}s"
         )
 
+        # ---------------------------
+        # Final additional inference using best candidate (and image if available)
+        # ---------------------------
+        with torch.no_grad():
+            if config.pgd_attack and best_image is not None:
+                pixel_values = self.normalize(best_image)
+                image_features = model.get_image_features(pixel_values=pixel_values)
+                input_embeds = self._build_input_embeds_gcg_pgd(
+                    best_optim_ids,
+                    image_features,
+                    search_width=1,
+                    no_target=True,
+                )
+            else:
+                input_embeds = self._build_input_embeds_gcg(
+                    best_optim_ids,
+                    search_width=1,
+                    no_target=True,
+                )
+            final_generated_ids = model.generate(
+                inputs_embeds=input_embeds, max_new_tokens=120
+            )
+            best_gen_output = tokenizer.decode(
+                final_generated_ids[0], skip_special_tokens=True
+            )
+            logger.info(f"Final output generated using best candidate: {best_gen_output}")
+
+            # ---------------------------
+            # Final LlamaGuard evaluation using best candidate output
+            # ---------------------------
+            guard_chat = parse_conversation(self.initial_prompt, best_gen_output)
+            llama_guard_final_eval = llama_guard_moderate(guard_chat)
+            logger.info(f"Final LlamaGuard evaluation using best candidate: {llama_guard_final_eval}")
+            final_llama_guard_flag = "unsafe" in llama_guard_final_eval.lower()
+            overall_llama_guard_unsafe = llama_guard_found_unsafe or final_llama_guard_flag
+
+        # Optionally, you might want to append the final generated output to model_outputs:
+        model_outputs.append(best_gen_output)
+
+        # Use the best candidate (based on lowest loss) for the final result.
         min_loss_index = losses.index(min(losses))
-
-        # ---------------------------
-        # Final additional LlamaGuard evaluation using best candidate (and image if available)
-        # ---------------------------
-        guard_chat = parse_conversation(self.initial_prompt, gen_output)
-        llama_guard_final_eval = llama_guard_moderate(guard_chat)
-        logger.info(f"Final LlamaGuard evaluation: {llama_guard_final_eval}")
-        final_llama_guard_flag = "unsafe" in llama_guard_final_eval.lower()
-
-        overall_llama_guard_unsafe = llama_guard_found_unsafe or final_llama_guard_flag
-
         result = GCGResult(
             best_loss=losses[min_loss_index],
             best_string=optim_strings[min_loss_index],
@@ -848,6 +896,8 @@ class GCG:
             llama_guard_unsafe=overall_llama_guard_unsafe,
         )
         return result
+
+
 
     def init_buffer(self, image) -> AttackBuffer:
         model = self.model
@@ -1200,6 +1250,7 @@ def run(
     tokenizer,
     processor,
     messages: Union[str, List[dict]],
+    goal: str,
     target: str,
     image: Tensor = None,
     config: Optional[GCGConfig] = None,
@@ -1209,5 +1260,5 @@ def run(
         config = GCGConfig()
     logger.setLevel(getattr(logging, config.verbosity))
     gcg = GCG(model, tokenizer, processor, config, normalize)
-    result = gcg.run(messages, target, image)
+    result = gcg.run(messages, goal, target, image)
     return result

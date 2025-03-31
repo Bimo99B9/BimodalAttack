@@ -161,6 +161,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
                 tokenizer,
                 processor,
                 messages,
+                goal,
                 target,
                 image,
                 config,
