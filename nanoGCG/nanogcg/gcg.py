@@ -838,7 +838,7 @@ class GCG:
             # Save image and (optionally) generate debug output.
             if config.pgd_attack:
                 self._save_image(image, os.path.join(images_folder, f"{i}.png"))
-            if config.debug_output and i % 10 == 0:
+            if (config.debug_output and i % 10 == 0) or (i == config.num_steps - 1):
                 with torch.no_grad():
                     if config.pgd_attack:
                         pixel_values = self.normalize(image)

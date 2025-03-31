@@ -45,7 +45,7 @@ def get_images_folder(experiment_folder, pair_number):
     return images_folder
 
 
-def write_parameters_csv(experiment_folder, config_kwargs, seed, name):
+def write_parameters_csv(experiment_folder, config_kwargs, seed, name, num_prompts):
     parameters_csv_path = os.path.join(experiment_folder, "parameters.csv")
     with open(parameters_csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -67,4 +67,5 @@ def write_parameters_csv(experiment_folder, config_kwargs, seed, name):
             else:
                 writer.writerow([key, value])
         writer.writerow(["seed", seed])
+        writer.writerow(["num_prompts", num_prompts])
     logging.info(f"Saved parameters CSV to {parameters_csv_path}")

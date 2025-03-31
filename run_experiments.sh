@@ -171,9 +171,26 @@ set -e
 #     > experiments_gemma_gcg.out 2>&1
 
 # 3. Both PGD and GCG (GRADS -> PGD -> GRADS -> GCG)
-CUDA_VISIBLE_DEVICES=7 python experiments.py \
-    --name "Gemma - PGD + GCG" \
-    --num_steps 250 \
+# CUDA_VISIBLE_DEVICES=7 python experiments.py \
+#     --name "Gemma - PGD + GCG" \
+#     --num_steps 250 \
+#     --search_width 512 \
+#     --dynamic_search False \
+#     --min_search_width 512 \
+#     --pgd_attack True \
+#     --gcg_attack True \
+#     --pgd_after_gcg False \
+#     --alpha "4/255" \
+#     --eps "64/255" \
+#     --debug_output True \
+#     --joint_eval False \
+#     >experiments_gemma_pgd_gcg.out 2>&1
+
+# 4. Joint eval with PGD and GCG (GRADS -> PGD -> GRADS -> GCG)
+
+CUDA_VISIBLE_DEVICES=5 python experiments.py \
+    --name "Gemma - Joint Eval Long" \
+    --num_steps 400 \
     --search_width 512 \
     --dynamic_search False \
     --min_search_width 512 \
@@ -181,7 +198,7 @@ CUDA_VISIBLE_DEVICES=7 python experiments.py \
     --gcg_attack True \
     --pgd_after_gcg False \
     --alpha "4/255" \
-    --eps "64/255" \
+    --eps "96/255" \
     --debug_output True \
-    --joint_eval False \
-    >experiments_gemma_pgd_gcg.out 2>&1
+    --joint_eval True \
+    > experiments_gemma_pgd_gcg_jointeval_2.out 2>&1

@@ -68,7 +68,7 @@ def load_model_and_processor(model_id):
             model_id, torch_dtype=torch.bfloat16, device_map="auto"
         )
         model.eval()
-        processor = AutoProcessor.from_pretrained(model_id)
+        processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
     else:
         raise ValueError(f"Model {model_id} not supported.")
     return model, processor
@@ -272,7 +272,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             writer.writerow(row)
     logging.info(f"Saved aggregated times CSV to {times_csv_path}")
 
-    write_parameters_csv(experiment_folder, config_kwargs, EXPERIMENT_SEED, name)
+    write_parameters_csv(experiment_folder, config_kwargs, EXPERIMENT_SEED, name, NUM_PROMPTS)
 
     best_strings_path = os.path.join(experiment_folder, "best_strings.txt")
     with open(best_strings_path, "w") as f:
