@@ -990,7 +990,7 @@ class GCG:
                 single=True,
             )
         else:
-            self._build_input_embeds_gcg(
+            init_buffer_embeds = self._build_input_embeds_gcg(
                 init_buffer_ids, search_width=true_buffer_size, no_joint_eval=True
             )
 
