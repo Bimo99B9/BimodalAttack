@@ -189,7 +189,7 @@ set -e
 # 4. Joint eval with PGD and GCG (GRADS -> PGD -> GRADS -> GCG)
 
 CUDA_VISIBLE_DEVICES=5 python experiments.py \
-    --name "Gemma - Test" \
+    --name "Llava - Test" \
     --num_steps 16 \
     --search_width 216 \
     --dynamic_search False \
@@ -199,6 +199,6 @@ CUDA_VISIBLE_DEVICES=5 python experiments.py \
     --pgd_after_gcg False \
     --alpha "4/255" \
     --eps "96/255" \
-    --debug_output True \
+    --debug_output False \
     --joint_eval False \
-    > experiments_gemma_test.out 2>&1
+    > experiments_llava_test.out 2>&1

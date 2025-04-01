@@ -568,11 +568,15 @@ class GCG:
 
                 if config.pgd_attack:
                     pixel_values = self.normalize(image)
-                    image_features = model.get_image_features(
-                        pixel_values=pixel_values,
-                        # vision_feature_layer=-2,
-                        # vision_feature_select_strategy="default",
-                    )
+                    if self.processor.__class__.__name__ == "Gemma3Processor":
+                        image_features = model.get_image_features(pixel_values=pixel_values)
+                    else:
+                        image_features = model.get_image_features(
+                            pixel_values=pixel_values,
+                            vision_feature_layer=-2,
+                            vision_feature_select_strategy="default"
+                        )
+
                     if config.pgd_after_gcg:
                         if config.joint_eval:
                             candidate_input_embeds = self._build_input_embeds_gcg_pgd(
@@ -737,9 +741,15 @@ class GCG:
                 with torch.no_grad():
                     start_loss = time.perf_counter()
                     pixel_values = self.normalize(image)
-                    image_features = model.get_image_features(
-                        pixel_values=pixel_values,
-                    )
+                    if self.processor.__class__.__name__ == "Gemma3Processor":
+                        image_features = model.get_image_features(pixel_values=pixel_values)
+                    else:
+                        image_features = model.get_image_features(
+                            pixel_values=pixel_values,
+                            vision_feature_layer=-2,
+                            vision_feature_select_strategy="default"
+                        )
+
                     full_input_embeds = self._build_input_embeds_gcg_pgd(
                         chosen_candidate, image_features
                     )
@@ -770,13 +780,19 @@ class GCG:
             # Save image and (optionally) generate debug output.
             if config.pgd_attack:
                 self._save_image(image, os.path.join(images_folder, f"{i}.png"))
-            if (config.debug_output and i % 10 == 0) or (i == config.num_steps - 1):
+            if config.debug_output and i % 10 == 0:
                 with torch.no_grad():
                     if config.pgd_attack:
                         pixel_values = self.normalize(image)
-                        image_features = model.get_image_features(
-                            pixel_values=pixel_values,
-                        )
+                        if self.processor.__class__.__name__ == "Gemma3Processor":
+                            image_features = model.get_image_features(pixel_values=pixel_values)
+                        else:
+                            image_features = model.get_image_features(
+                                pixel_values=pixel_values,
+                                vision_feature_layer=-2,
+                                vision_feature_select_strategy="default"
+                            )
+
                         input_embeds = self._build_input_embeds_gcg_pgd(
                             sampled_ids,
                             image_features,
@@ -846,7 +862,15 @@ class GCG:
         with torch.no_grad():
             if config.pgd_attack and best_image is not None:
                 pixel_values = self.normalize(best_image)
-                image_features = model.get_image_features(pixel_values=pixel_values)
+                if self.processor.__class__.__name__ == "Gemma3Processor":
+                    image_features = model.get_image_features(pixel_values=pixel_values)
+                else:
+                    image_features = model.get_image_features(
+                        pixel_values=pixel_values,
+                        vision_feature_layer=-2,
+                        vision_feature_select_strategy="default"
+                    )
+
                 input_embeds = self._build_input_embeds_gcg_pgd(
                     best_optim_ids,
                     image_features,
@@ -950,9 +974,15 @@ class GCG:
 
         if config.pgd_attack:
             pixel_values = self.normalize(image)
-            image_features = model.get_image_features(
-                pixel_values=pixel_values,
-            )
+            if self.processor.__class__.__name__ == "Gemma3Processor":
+                image_features = model.get_image_features(pixel_values=pixel_values)
+            else:
+                image_features = model.get_image_features(
+                    pixel_values=pixel_values,
+                    vision_feature_layer=-2,
+                    vision_feature_select_strategy="default"
+                )
+
             init_buffer_embeds = self._build_input_embeds_gcg_pgd(
                 init_buffer_ids,
                 image_features,
@@ -1039,9 +1069,15 @@ class GCG:
 
         if self.config.pgd_attack:
             pixel_values = self.normalize(image)
-            image_features = model.get_image_features(
-                pixel_values=pixel_values,
-            )
+            if self.processor.__class__.__name__ == "Gemma3Processor":
+                image_features = model.get_image_features(pixel_values=pixel_values)
+            else:
+                image_features = model.get_image_features(
+                    pixel_values=pixel_values,
+                    vision_feature_layer=-2,
+                    vision_feature_select_strategy="default"
+                )
+
             input_embeds = torch.cat(
                 [
                     self.before_img_embeds,
