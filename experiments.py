@@ -342,7 +342,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
 
     plt.xlabel("Iteration")
     plt.ylabel("Loss")
-    plt.title(f"{name} (Aggregated)")
+    plt.title(f"{name}")
     ax = plt.gca()
 
     config_text = "\n".join(
