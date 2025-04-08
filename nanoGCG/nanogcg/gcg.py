@@ -505,15 +505,9 @@ class GCG:
             if config.pgd_attack and not config.pgd_after_gcg:
                 logger.info(f"[Iteration {i}] Running PGD before GCG (Phase B)")
                 start_pgd = time.perf_counter()
-                image = (
-                    (image - config.alpha * config.eps * torch.sign(image_grad))
-                    .detach()
-                    .requires_grad_()
-                )
-                image = torch.clamp(
-                    image, image_original - config.eps, image_original + config.eps
-                )
-                image = torch.clamp(image, 0, 1)
+                
+                image = self.pgd_attack(image, config.eps, config.alpha, image_grad, image_original)
+                
                 pgd_time = time.perf_counter() - start_pgd
                 pgd_times.append(pgd_time)
                 total_pgd_time += pgd_time
@@ -722,15 +716,7 @@ class GCG:
                     f"[Iteration {i}] Running PGD after GCG: PGD update (Phase F)"
                 )
                 start_pgd = time.perf_counter()
-                image = (
-                    (image - config.alpha * config.eps * torch.sign(image_grad))
-                    .detach()
-                    .requires_grad_()
-                )
-                image = torch.clamp(
-                    image, image_original - config.eps, image_original + config.eps
-                )
-                image = torch.clamp(image, 0, 1)
+                image = self.pgd_attack(image, config.eps, config.alpha, image_grad, image_original)
                 pgd_time = time.perf_counter() - start_pgd
                 pgd_times.append(pgd_time)
                 total_pgd_time += pgd_time
@@ -1126,6 +1112,19 @@ class GCG:
             else:
                 optim_ids_onehot_grad = None
             return optim_ids_onehot_grad, None
+
+    def pgd_attack(image: Tensor, eps: float, alpha: float, image_grad, image_original) -> Tensor:
+        image = (
+            (image - alpha * eps * torch.sign(image_grad))
+            .detach()
+            .requires_grad_()
+        )
+        image = torch.clamp(
+            image, image_original - eps, image_original + eps
+        )
+        image = torch.clamp(image, 0, 1)
+        
+        return image
 
     def _build_input_embeds_pgd(
         self,
