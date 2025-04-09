@@ -3,6 +3,7 @@ import sys
 import logging
 import argparse
 import torch
+import re
 from PIL import Image
 import pandas as pd
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -47,19 +48,48 @@ def load_harmful_behaviors(csv_path):
 
 
 def parse_conversation(raw_text):
-    if "ASSISTANT:" not in raw_text:
-        raise ValueError("Missing 'ASSISTANT:' marker in output.")
-    parts = raw_text.split("ASSISTANT:")
-    user_part = parts[0].strip()
-    assistant_part = parts[1].strip()
-    if user_part.startswith("USER:"):
-        user_text = user_part[len("USER:") :].strip()
+    logging.debug(
+        "Parsing conversation from raw text (first 200 chars): %s", raw_text[:200]
+    )
+    # Case 1: Llava output uses "ASSISTANT:" marker.
+    if "ASSISTANT:" in raw_text:
+        parts = raw_text.split("ASSISTANT:")
+        user_part = parts[0].strip()
+        assistant_part = parts[1].strip()
+        if user_part.startswith("USER:"):
+            user_text = user_part[len("USER:") :].strip()
+        else:
+            user_text = user_part
+        logging.debug("Detected Llava format with 'ASSISTANT:' marker.")
+        return [
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": assistant_part},
+        ]
+    # Case 2: Gemma output uses "model" marker.
+    elif re.search(r"(?im)^\s*model\s*$", raw_text):
+        # Split based on a line that contains the word "model" only.
+        split_parts = re.split(r"(?im)^\s*model\s*$", raw_text)
+        if len(split_parts) < 2:
+            logging.error(
+                "After splitting by 'model' marker, found insufficient parts."
+            )
+            raise ValueError("Gemma format: missing 'model' marker after splitting")
+        user_text = split_parts[0].strip()
+        assistant_text = split_parts[1].strip()
+        logging.debug("Detected Gemma format using 'model' marker.")
+        # Remove a leading "user" if present.
+        if user_text.lower().startswith("user"):
+            user_text = user_text[len("user") :].strip()
+            logging.debug("Removed leading 'user' from conversation text.")
+        return [
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": assistant_text},
+        ]
     else:
-        user_text = user_part
-    return [
-        {"role": "user", "content": user_text},
-        {"role": "assistant", "content": assistant_part},
-    ]
+        logging.error("Unable to detect conversation markers in the output.")
+        raise ValueError(
+            "Unable to parse conversation: expected 'ASSISTANT:' or 'model' marker."
+        )
 
 
 def main():
@@ -108,7 +138,7 @@ def main():
     model, processor = load_model_and_processor(MODEL_ID)
     logging.info("Model and processor loaded successfully.")
 
-    # Check if the experiment performs image attacks or text-only.
+    # Check if the experiment performs image attacks (pgd_attack True) or text-only.
     pgd_attack = params.get("pgd_attack", "True").lower() == "true"
     logging.info(f"pgd_attack: {pgd_attack}")
 
@@ -158,7 +188,6 @@ def main():
         best_iter = best_iterations.get(i)
         logging.info(f"Run {i} prompt constructed: {prompt_text}")
 
-        # Build conversation and inputs based on whether pgd_attack is enabled (image attack) or not.
         if pgd_attack:
             img_folder = os.path.join(exp_dir, f"images_{i}")
             img_path = os.path.join(img_folder, f"{best_iter}.png")
@@ -185,10 +214,7 @@ def main():
         else:
             # Text-only case.
             conversation = [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt_text}],
-                }
+                {"role": "user", "content": [{"type": "text", "text": prompt_text}]}
             ]
             llava_prompt = processor.apply_chat_template(
                 conversation, add_generation_prompt=True
