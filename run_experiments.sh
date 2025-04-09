@@ -188,17 +188,81 @@ set -e
 
 # 4. Joint eval with PGD and GCG (GRADS -> PGD -> GRADS -> GCG)
 
-CUDA_VISIBLE_DEVICES=6 python experiments.py \
-    --name "Gemma - Joint Eval DS" \
-    --num_steps 250 \
-    --search_width 512 \
-    --dynamic_search True \
-    --min_search_width 32 \
+# CUDA_VISIBLE_DEVICES=6 python experiments.py \
+#     --name "Gemma - Joint Eval DS" \
+#     --num_steps 250 \
+#     --search_width 512 \
+#     --dynamic_search True \
+#     --min_search_width 32 \
+#     --pgd_attack True \
+#     --gcg_attack True \
+#     --pgd_after_gcg False \
+#     --alpha "4/255" \
+#     --eps "64/255" \
+#     --debug_output False \
+#     --joint_eval True \
+#     >experiments_gemma_pgd_gcg_jointeval_ds.out 2>&1
+
+
+#####
+
+
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
+#     --name "Llava - Auto-PGD" \
+#     --num_steps 600 \
+#     --search_width 0 \
+#     --dynamic_search False \
+#     --min_search_width 0 \
+#     --pgd_attack True \
+#     --gcg_attack False \
+#     --pgd_after_gcg False \
+#     --alpha "0/255" \
+#     --eps "8/255" \
+#     --debug_output False \
+#     --joint_eval False \
+#     > experiments_llava_autopgd.out 2>&1
+
+CUDA_VISIBLE_DEVICES=4 python experiments.py \
+    --name "Llava - Auto-PGD 2" \
+    --num_steps 600 \
+    --search_width 0 \
+    --dynamic_search False \
+    --min_search_width 0 \
     --pgd_attack True \
-    --gcg_attack True \
+    --gcg_attack False \
     --pgd_after_gcg False \
-    --alpha "4/255" \
+    --alpha "0/255" \
     --eps "64/255" \
     --debug_output False \
-    --joint_eval True \
-    >experiments_gemma_pgd_gcg_jointeval_ds.out 2>&1
+    --joint_eval False \
+    > experiments_llava_autopgd_2.out 2>&1
+
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
+#     --name "Gemma - Auto-PGD" \
+#     --num_steps 600 \
+#     --search_width 0 \
+#     --dynamic_search False \
+#     --min_search_width 0 \
+#     --pgd_attack True \
+#     --gcg_attack False \
+#     --pgd_after_gcg False \
+#     --alpha "0/255" \
+#     --eps "8/255" \
+#     --debug_output False \
+#     --joint_eval False \
+#     > experiments_gemma_autopgd.out 2>&1
+
+# CUDA_VISIBLE_DEVICES=6 python experiments.py \
+#     --name "Gemma - Auto-PGD 2" \
+#     --num_steps 600 \
+#     --search_width 0 \
+#     --dynamic_search False \
+#     --min_search_width 0 \
+#     --pgd_attack True \
+#     --gcg_attack False \
+#     --pgd_after_gcg False \
+#     --alpha "0/255" \
+#     --eps "64/255" \
+#     --debug_output False \
+#     --joint_eval False \
+#     > experiments_gemma_autopgd_2.out 2>&1
