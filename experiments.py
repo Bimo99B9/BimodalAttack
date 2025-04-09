@@ -19,13 +19,9 @@ from utils.experiments_utils import (
     get_experiment_folder,
     get_images_folder,
     write_parameters_csv,
+    load_model_and_processor,
 )
 
-from transformers import (
-    AutoProcessor,
-    LlavaForConditionalGeneration,
-    Gemma3ForConditionalGeneration,
-)
 import torchvision.transforms as T
 from PIL import Image
 
@@ -54,69 +50,6 @@ def set_global_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def load_model_and_processor(model_id):
-    if model_id == "llava-hf/llava-1.5-7b-hf":
-        model = LlavaForConditionalGeneration.from_pretrained(
-            model_id,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            attn_implementation="flash_attention_2",
-        ).to("cuda")
-        processor = AutoProcessor.from_pretrained(model_id)
-    elif model_id == "google/gemma-3-4b-it":
-        model = Gemma3ForConditionalGeneration.from_pretrained(
-            model_id, torch_dtype=torch.bfloat16, device_map="auto"
-        )
-        model.eval()
-        processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
-    else:
-        raise ValueError(f"Model {model_id} not supported.")
-    return model, processor
-
-
-# Choose model ID. (To use Gemma 3, set MODEL_ID to "google/gemma-3-4b-it")
-MODEL_ID = "llava-hf/llava-1.5-7b-hf"
-# For testing Gemma 3 uncomment the following line:
-# MODEL_ID = "google/gemma-3-4b-it"
-model, processor = load_model_and_processor(MODEL_ID)
-
-if MODEL_ID == "llava-hf/llava-1.5-7b-hf":
-    transform = T.Compose(
-        [
-            T.Lambda(lambda img: img.convert("RGB")),
-            T.Resize(336, interpolation=T.InterpolationMode.BICUBIC),
-            T.CenterCrop((336, 336)),
-            T.ToTensor(),
-        ]
-    )
-    normalize = T.Normalize(
-        mean=[0.48145466, 0.4578275, 0.40821073],
-        std=[0.26862954, 0.26130258, 0.27577711],
-    )
-    tokenizer = processor.tokenizer
-elif MODEL_ID == "google/gemma-3-4b-it":
-    transform = T.Compose(
-        [
-            T.Lambda(lambda img: img.convert("RGB")),
-            T.Resize((896, 896), interpolation=T.InterpolationMode.BICUBIC),
-            T.CenterCrop((896, 896)),
-            T.ToTensor(),
-        ]
-    )
-    normalize = T.Normalize(
-        mean=[0.5, 0.5, 0.5],
-        std=[0.5, 0.5, 0.5],
-    )
-    tokenizer = processor.tokenizer
-else:
-    raise ValueError(f"Model {MODEL_ID} not supported.")
-
-image_file = "http://images.cocodataset.org/val2017/000000039769.jpg"
-raw_image = Image.open(requests.get(image_file, stream=True).raw).convert("RGB")
-image = transform(raw_image).unsqueeze(0).to(model.device)
-
-
-# --- Run experiments across multiple (goal, target) pairs ---
 def run_experiment(name, config_kwargs, advbench_pairs):
     experiment_folder = get_experiment_folder()
     logging.info(f"Experiment folder created: {experiment_folder}")
@@ -143,8 +76,13 @@ def run_experiment(name, config_kwargs, advbench_pairs):
         pair_number = idx + 1  # 1-indexed pair number
         images_folder = get_images_folder(experiment_folder, pair_number)
         # Build a config for the current run using a unique images folder.
+        # Note: Exclude "model" from the config since GCGConfig does not accept it.
         config = GCGConfig(
-            **{k: v for k, v in config_kwargs.items() if not k.endswith("_str")},
+            **{
+                k: v
+                for k, v in config_kwargs.items()
+                if not k.endswith("_str") and k != "model"
+            },
             seed=EXPERIMENT_SEED,
             verbosity="DEBUG",
             experiment_folder=experiment_folder,
@@ -439,11 +377,67 @@ if __name__ == "__main__":
     parser.add_argument(
         "--pgd_after_gcg", type=str2bool, required=True, help="PGD after GCG flag"
     )
+    # New parameter to select the model: "gemma" or "llava"
+    parser.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        choices=["gemma", "llava"],
+        help="Which model to use: 'gemma' for google/gemma-3-4b-it or 'llava' for llava-hf/llava-1.5-7b-hf",
+    )
     args = parser.parse_args()
 
     alpha_float = fraction_type(args.alpha)
     eps_float = fraction_type(args.eps)
 
+    # Determine the model ID based on the passed model parameter.
+    if args.model == "llava":
+        MODEL_ID = "llava-hf/llava-1.5-7b-hf"
+    elif args.model == "gemma":
+        MODEL_ID = "google/gemma-3-4b-it"
+    else:
+        raise ValueError(f"Unknown model argument: {args.model}")
+
+    # Load the selected model and its processor
+    model, processor = load_model_and_processor(MODEL_ID)
+
+    if MODEL_ID == "llava-hf/llava-1.5-7b-hf":
+        transform = T.Compose(
+            [
+                T.Lambda(lambda img: img.convert("RGB")),
+                T.Resize(336, interpolation=T.InterpolationMode.BICUBIC),
+                T.CenterCrop((336, 336)),
+                T.ToTensor(),
+            ]
+        )
+        normalize = T.Normalize(
+            mean=[0.48145466, 0.4578275, 0.40821073],
+            std=[0.26862954, 0.26130258, 0.27577711],
+        )
+        tokenizer = processor.tokenizer
+    elif MODEL_ID == "google/gemma-3-4b-it":
+        transform = T.Compose(
+            [
+                T.Lambda(lambda img: img.convert("RGB")),
+                T.Resize((896, 896), interpolation=T.InterpolationMode.BICUBIC),
+                T.CenterCrop((896, 896)),
+                T.ToTensor(),
+            ]
+        )
+        normalize = T.Normalize(
+            mean=[0.5, 0.5, 0.5],
+            std=[0.5, 0.5, 0.5],
+        )
+        tokenizer = processor.tokenizer
+    else:
+        raise ValueError(f"Model {MODEL_ID} not supported.")
+
+    # Load the example image.
+    image_file = "http://images.cocodataset.org/val2017/000000039769.jpg"
+    raw_image = Image.open(requests.get(image_file, stream=True).raw).convert("RGB")
+    image = transform(raw_image).unsqueeze(0).to(model.device)
+
+    # Include the model parameter in the configuration for saving
     config_kwargs = {
         "num_steps": args.num_steps,
         "search_width": args.search_width,
@@ -458,5 +452,6 @@ if __name__ == "__main__":
         "eps_str": args.eps,
         "joint_eval": args.joint_eval,
         "pgd_after_gcg": args.pgd_after_gcg,
+        "model": args.model,
     }
     run_experiment(args.name, config_kwargs, advbench_pairs)

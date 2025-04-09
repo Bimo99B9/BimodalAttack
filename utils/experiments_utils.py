@@ -3,6 +3,13 @@ import logging
 import os
 import csv
 
+import torch
+from transformers import (
+    AutoProcessor,
+    LlavaForConditionalGeneration,
+    Gemma3ForConditionalGeneration,
+)
+
 
 # --- Load advbench dataset ---
 def load_advbench_dataset(filepath):
@@ -69,3 +76,26 @@ def write_parameters_csv(experiment_folder, config_kwargs, seed, name, num_promp
         writer.writerow(["seed", seed])
         writer.writerow(["num_prompts", num_prompts])
     logging.info(f"Saved parameters CSV to {parameters_csv_path}")
+
+
+# --- Load model and processor ---
+
+
+def load_model_and_processor(model_id):
+    if model_id == "llava-hf/llava-1.5-7b-hf":
+        model = LlavaForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+            attn_implementation="flash_attention_2",
+        ).to("cuda")
+        processor = AutoProcessor.from_pretrained(model_id)
+    elif model_id == "google/gemma-3-4b-it":
+        model = Gemma3ForConditionalGeneration.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16, device_map="auto"
+        )
+        model.eval()
+        processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
+    else:
+        raise ValueError(f"Model {model_id} not supported.")
+    return model, processor

@@ -51,25 +51,26 @@ def llama_guard_moderate(chat):
     return llama_guard_tokenizer.decode(
         output[0][prompt_len:], skip_special_tokens=True
     )
-    
+
+
 def parse_conversation(prompt, output):
     """
     We want this format for LlamaGuard:
-    
+
     moderate([
     {"role": "user", "content": "I forgot how to kill a process in Linux, can you help?"},
     {"role": "assistant", "content": "Sure! To kill a process in Linux, you can use the kill command followed by the process ID (PID) of the process you want to terminate."},
     ])
-    
+
     And we provide "prompt", which is the content of the user message, and "output", which is the content of the assistant message.
     """
     result = [
         {"role": "user", "content": prompt},
         {"role": "assistant", "content": output.strip()},
     ]
-    
+
     logger.info(f"Parsed conversation for LlamaGuard: {result}")
-    return result 
+    return result
 
 
 # ---------------------------
@@ -294,7 +295,11 @@ class GCG:
                 self.processor.chat_template = custom_template
 
     def run(
-        self, messages: Union[str, List[dict]], goal: str, target: str, image: torch.Tensor = None
+        self,
+        messages: Union[str, List[dict]],
+        goal: str,
+        target: str,
+        image: torch.Tensor = None,
     ) -> GCGResult:
         model = self.model
         tokenizer = self.tokenizer
@@ -506,11 +511,12 @@ class GCG:
             if config.pgd_attack and not config.pgd_after_gcg:
                 logger.info(f"[Iteration {i}] Running PGD before GCG (Phase B)")
                 start_pgd = time.perf_counter()
-                
+
                 # image = self.perform_pgd_step(image, config.eps, config.alpha, image_grad, image_original)
-                image = self.perform_autopgd_step(image, config.eps, image_grad, image_original, current_loss, i)
-                
-                
+                image = self.perform_autopgd_step(
+                    image, config.eps, image_grad, image_original, current_loss, i
+                )
+
                 pgd_time = time.perf_counter() - start_pgd
                 pgd_times.append(pgd_time)
                 total_pgd_time += pgd_time
@@ -566,12 +572,14 @@ class GCG:
                 if config.pgd_attack:
                     pixel_values = self.normalize(image)
                     if self.processor.__class__.__name__ == "Gemma3Processor":
-                        image_features = model.get_image_features(pixel_values=pixel_values)
+                        image_features = model.get_image_features(
+                            pixel_values=pixel_values
+                        )
                     else:
                         image_features = model.get_image_features(
                             pixel_values=pixel_values,
                             vision_feature_layer=-2,
-                            vision_feature_select_strategy="default"
+                            vision_feature_select_strategy="default",
                         )
 
                     if config.pgd_after_gcg:
@@ -731,8 +739,10 @@ class GCG:
                 #     rho=0.75,
                 #     current_loss=current_loss
                 # )
-                image = self.perform_autopgd_step(image, config.eps, image_grad, image_original, current_loss, i)
-                
+                image = self.perform_autopgd_step(
+                    image, config.eps, image_grad, image_original, current_loss, i
+                )
+
                 pgd_time = time.perf_counter() - start_pgd
                 pgd_times.append(pgd_time)
                 total_pgd_time += pgd_time
@@ -744,12 +754,14 @@ class GCG:
                     start_loss = time.perf_counter()
                     pixel_values = self.normalize(image)
                     if self.processor.__class__.__name__ == "Gemma3Processor":
-                        image_features = model.get_image_features(pixel_values=pixel_values)
+                        image_features = model.get_image_features(
+                            pixel_values=pixel_values
+                        )
                     else:
                         image_features = model.get_image_features(
                             pixel_values=pixel_values,
                             vision_feature_layer=-2,
-                            vision_feature_select_strategy="default"
+                            vision_feature_select_strategy="default",
                         )
 
                     full_input_embeds = self._build_input_embeds_gcg_pgd(
@@ -787,12 +799,14 @@ class GCG:
                     if config.pgd_attack:
                         pixel_values = self.normalize(image)
                         if self.processor.__class__.__name__ == "Gemma3Processor":
-                            image_features = model.get_image_features(pixel_values=pixel_values)
+                            image_features = model.get_image_features(
+                                pixel_values=pixel_values
+                            )
                         else:
                             image_features = model.get_image_features(
                                 pixel_values=pixel_values,
                                 vision_feature_layer=-2,
-                                vision_feature_select_strategy="default"
+                                vision_feature_select_strategy="default",
                             )
 
                         input_embeds = self._build_input_embeds_gcg_pgd(
@@ -870,7 +884,7 @@ class GCG:
                     image_features = model.get_image_features(
                         pixel_values=pixel_values,
                         vision_feature_layer=-2,
-                        vision_feature_select_strategy="default"
+                        vision_feature_select_strategy="default",
                     )
 
                 input_embeds = self._build_input_embeds_gcg_pgd(
@@ -891,16 +905,22 @@ class GCG:
             best_gen_output = tokenizer.decode(
                 final_generated_ids[0], skip_special_tokens=True
             )
-            logger.info(f"Final output generated using best candidate: {best_gen_output}")
+            logger.info(
+                f"Final output generated using best candidate: {best_gen_output}"
+            )
 
             # ---------------------------
             # Final LlamaGuard evaluation using best candidate output
             # ---------------------------
             guard_chat = parse_conversation(self.initial_prompt, best_gen_output)
             llama_guard_final_eval = llama_guard_moderate(guard_chat)
-            logger.info(f"Final LlamaGuard evaluation using best candidate: {llama_guard_final_eval}")
+            logger.info(
+                f"Final LlamaGuard evaluation using best candidate: {llama_guard_final_eval}"
+            )
             final_llama_guard_flag = "unsafe" in llama_guard_final_eval.lower()
-            overall_llama_guard_unsafe = llama_guard_found_unsafe or final_llama_guard_flag
+            overall_llama_guard_unsafe = (
+                llama_guard_found_unsafe or final_llama_guard_flag
+            )
 
         # Optionally, you might want to append the final generated output to model_outputs:
         model_outputs.append(best_gen_output)
@@ -922,8 +942,6 @@ class GCG:
             llama_guard_unsafe=overall_llama_guard_unsafe,
         )
         return result
-
-
 
     def init_buffer(self, image) -> AttackBuffer:
         model = self.model
@@ -982,7 +1000,7 @@ class GCG:
                 image_features = model.get_image_features(
                     pixel_values=pixel_values,
                     vision_feature_layer=-2,
-                    vision_feature_select_strategy="default"
+                    vision_feature_select_strategy="default",
                 )
 
             init_buffer_embeds = self._build_input_embeds_gcg_pgd(
@@ -1077,7 +1095,7 @@ class GCG:
                 image_features = model.get_image_features(
                     pixel_values=pixel_values,
                     vision_feature_layer=-2,
-                    vision_feature_select_strategy="default"
+                    vision_feature_select_strategy="default",
                 )
 
             input_embeds = torch.cat(
@@ -1129,51 +1147,24 @@ class GCG:
                 optim_ids_onehot_grad = None
             return optim_ids_onehot_grad, None
 
-    def perform_pgd_step(image: Tensor, eps: float, alpha: float, image_grad, image_original) -> Tensor:
-        image = (
-            (image - alpha * eps * torch.sign(image_grad))
-            .detach()
-            .requires_grad_()
-        )
-        image = torch.clamp(
-            image, image_original - eps, image_original + eps
-        )
+    def perform_pgd_step(
+        image: Tensor, eps: float, alpha: float, image_grad, image_original
+    ) -> Tensor:
+        image = (image - alpha * eps * torch.sign(image_grad)).detach().requires_grad_()
+        image = torch.clamp(image, image_original - eps, image_original + eps)
         image = torch.clamp(image, 0, 1)
-        
+
         return image
-    
+
     def perform_autopgd_step(
         self,
-        image: torch.Tensor, 
+        image: torch.Tensor,
         eps: float,
-        image_grad: torch.Tensor, 
+        image_grad: torch.Tensor,
         image_original: torch.Tensor,
         current_loss: Optional[float],
-        iter_idx: int
+        iter_idx: int,
     ) -> torch.Tensor:
-        """
-        Performs one APGD update step with momentum and automatic step-size adaptation 
-        as described in the paper "Reliable Evaluation of Adversarial Robustness with 
-        an Ensemble of Diverse Parameter-free Attacks". 
-
-        The function uses only the essential inputs:
-        - image: current iterate (x(k))
-        - eps: ℓ∞ perturbation bound (assumed on [0, 1]-scaled images)
-        - image_grad: gradient of the loss with respect to the image
-        - image_original: original (clean) image (to enforce the perturbation constraint)
-        - current_loss: current loss value at x(k) (used for tracking improvements)
-        - iter_idx: current iteration index
-
-        The momentum coefficient α is fixed to 0.75. The initial step size η is 
-        set to 2ε and is adapted every 10 iterations (checkpoint_interval = 10) using a 
-        threshold ρ = 0.75 as in the paper. If the progress is too slow according to 
-        these criteria, the step size is halved and the update is restarted from 
-        the best point seen so far.
-        
-        Returns:
-        The updated image tensor.
-        """
-        # Hard-coded hyperparameters (as fixed in the paper):
         alpha = 0.75
         checkpoint_interval = 10
         rho = 0.75
@@ -1182,7 +1173,9 @@ class GCG:
         if not hasattr(self, "pgd_state_initialized"):
             self.pgd_prev_image = image.clone()
             self.pgd_best_image = image.clone()
-            self.pgd_best_loss = current_loss if current_loss is not None else float("inf")
+            self.pgd_best_loss = (
+                current_loss if current_loss is not None else float("inf")
+            )
             self.pgd_current_eta = 2 * eps  # initial step size as in the paper
             self.pgd_improvement_count = 0
             self.pgd_last_best_loss = self.pgd_best_loss
@@ -1191,17 +1184,21 @@ class GCG:
         # --- APGD Update Step with Momentum ---
         # 1. Compute the gradient sign (for ℓ∞ attacks, using the descent direction).
         grad_sign = torch.sign(image_grad)
-        
-        # Take a descent step (note the subtraction to minimize the loss)
+
+        # Take a descent step
         z = image - self.pgd_current_eta * grad_sign
-        # Project z back into the ℓ∞-ball around the original image and [0,1] range.
-        z = torch.max(torch.min(z, image_original + eps), image_original - eps).clamp(0, 1)
-        
+        z = torch.max(torch.min(z, image_original + eps), image_original - eps).clamp(
+            0, 1
+        )
+
         # 2. Incorporate momentum:
-        new_image = image + alpha * (z - image) + (1 - alpha) * (image - self.pgd_prev_image)
-        new_image = torch.max(torch.min(new_image, image_original + eps), image_original - eps).clamp(0, 1)
-        
-        # Update momentum state for next iteration.
+        new_image = (
+            image + alpha * (z - image) + (1 - alpha) * (image - self.pgd_prev_image)
+        )
+        new_image = torch.max(
+            torch.min(new_image, image_original + eps), image_original - eps
+        ).clamp(0, 1)
+
         self.pgd_prev_image = image.clone()
 
         # --- Step-size Adaptation and Best-Image Tracking ---
@@ -1218,7 +1215,10 @@ class GCG:
             # At checkpoint intervals, decide whether to reduce the step size.
             if (iter_idx + 1) % checkpoint_interval == 0:
                 improvement_fraction = self.pgd_improvement_count / checkpoint_interval
-                if improvement_fraction < rho or self.pgd_best_loss == self.pgd_last_best_loss:
+                if (
+                    improvement_fraction < rho
+                    or self.pgd_best_loss == self.pgd_last_best_loss
+                ):
                     # Halve the step size and restart from the best solution so far.
                     self.pgd_current_eta /= 2
                     new_image = self.pgd_best_image.clone()
@@ -1228,7 +1228,6 @@ class GCG:
                 self.pgd_last_best_loss = self.pgd_best_loss
 
         return new_image
-
 
     def _build_input_embeds_pgd(
         self,
