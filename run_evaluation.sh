@@ -4,13 +4,13 @@
 # experiments=("exp1" "exp2" "exp3" "exp4" "exp5" "exp7" "exp8" "exp9" "exp19" "exp26" "exp27" "exp28" "exp29" "exp30" "exp31" "exp38")
 
 
-experiments=("exp1" "exp3" "exp4" "exp8" "exp9" "exp19" "exp26" "exp27" "exp28" "exp29" "exp30" "exp31" "exp38")
+experiments=("exp19")
 
 # experiments=("exp27")
 
 
 for exp in "${experiments[@]}"; do
-    CUDA_VISIBLE_DEVICES=4 \
+    CUDA_VISIBLE_DEVICES=5 \
     python evaluation.py \
         "$exp" \
         --k 25 \

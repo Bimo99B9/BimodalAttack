@@ -48,9 +48,7 @@ def load_harmful_behaviors(csv_path):
 
 
 def parse_conversation(raw_text):
-    logging.debug(
-        "Parsing conversation from raw text (first 200 chars): %s", raw_text[:200]
-    )
+    logging.info("Parsing conversation from raw text: %s", raw_text)
     # Case 1: Llava output uses "ASSISTANT:" marker.
     if "ASSISTANT:" in raw_text:
         parts = raw_text.split("ASSISTANT:")
@@ -60,14 +58,13 @@ def parse_conversation(raw_text):
             user_text = user_part[len("USER:") :].strip()
         else:
             user_text = user_part
-        logging.debug("Detected Llava format with 'ASSISTANT:' marker.")
+        logging.info("Detected Llava format with 'ASSISTANT:' marker.")
         return [
             {"role": "user", "content": user_text},
             {"role": "assistant", "content": assistant_part},
         ]
     # Case 2: Gemma output uses "model" marker.
     elif re.search(r"(?im)^\s*model\s*$", raw_text):
-        # Split based on a line that contains the word "model" only.
         split_parts = re.split(r"(?im)^\s*model\s*$", raw_text)
         if len(split_parts) < 2:
             logging.error(
@@ -76,11 +73,11 @@ def parse_conversation(raw_text):
             raise ValueError("Gemma format: missing 'model' marker after splitting")
         user_text = split_parts[0].strip()
         assistant_text = split_parts[1].strip()
-        logging.debug("Detected Gemma format using 'model' marker.")
-        # Remove a leading "user" if present.
+        logging.info("Detected Gemma format using 'model' marker.")
+        # Remove leading "user" if present.
         if user_text.lower().startswith("user"):
             user_text = user_text[len("user") :].strip()
-            logging.debug("Removed leading 'user' from conversation text.")
+            logging.info("Removed leading 'user' from conversation text.")
         return [
             {"role": "user", "content": user_text},
             {"role": "assistant", "content": assistant_text},
@@ -177,7 +174,6 @@ def main():
     overall_unsafe_count = 0
     overall_total = 0
     summary = []
-
     gpu_device = "cuda"
 
     for i in range(1, num_prompts + 1):
@@ -188,6 +184,7 @@ def main():
         best_iter = best_iterations.get(i)
         logging.info(f"Run {i} prompt constructed: {prompt_text}")
 
+        # Build inputs based on whether image attack is enabled (pgd_attack) or text-only.
         if pgd_attack:
             img_folder = os.path.join(exp_dir, f"images_{i}")
             img_path = os.path.join(img_folder, f"{best_iter}.png")
@@ -205,21 +202,20 @@ def main():
                     ],
                 }
             ]
-            llava_prompt = processor.apply_chat_template(
+            model_prompt = processor.apply_chat_template(
                 conversation, add_generation_prompt=True
             )
             inputs = processor(
-                images=adv_image, text=llava_prompt, return_tensors="pt"
+                images=adv_image, text=model_prompt, return_tensors="pt"
             ).to(gpu_device, torch.float16)
         else:
-            # Text-only case.
             conversation = [
                 {"role": "user", "content": [{"type": "text", "text": prompt_text}]}
             ]
-            llava_prompt = processor.apply_chat_template(
+            model_prompt = processor.apply_chat_template(
                 conversation, add_generation_prompt=True
             )
-            inputs = processor(text=llava_prompt, return_tensors="pt").to(
+            inputs = processor(text=model_prompt, return_tensors="pt").to(
                 gpu_device, torch.float16
             )
             logging.info(f"Run {i} proceeding with text-only prompt (no image).")
@@ -232,10 +228,11 @@ def main():
         run_results = []
         unsafe_count = 0
         for idx in range(k):
-            llava_output = processor.decode(outputs[idx], skip_special_tokens=True)
+            model_output = processor.decode(outputs[idx], skip_special_tokens=True)
             logging.info(f"Run {i} Generation {idx+1} output obtained.")
             try:
-                chat = parse_conversation(llava_output)
+                chat = parse_conversation(model_output)
+                logging.info(f"Run {i} Generation {idx+1} parsed conversation: {chat}")
             except Exception as e:
                 logging.error(f"Run {i} generation {idx+1} parse error: {e}")
                 continue
@@ -252,7 +249,7 @@ def main():
             run_results.append(
                 {
                     "generation": idx + 1,
-                    "llava_output": llava_output,
+                    "model_output": model_output,
                     "moderation_result": moderation_output,
                     "unsafe": is_unsafe,
                 }
@@ -281,7 +278,7 @@ def main():
             f.write(f"Prompt: {prompt_text}\n\n")
             for res in run_results:
                 f.write(f"Generation {res['generation']}:\n")
-                f.write(f"Output:\n{res['llava_output']}\n")
+                f.write(f"Output:\n{res['model_output']}\n")
                 f.write(f"Moderation Result: {res['moderation_result']}\n")
                 f.write(f"Unsafe: {res['unsafe']}\n")
                 f.write("-" * 50 + "\n")

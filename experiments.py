@@ -34,7 +34,7 @@ os.makedirs("experiments", exist_ok=True)
 
 EXPERIMENT_SEED = 1
 USE_ALL_PROMPTS = False
-NUM_PROMPTS = 10
+NUM_PROMPTS = 5
 ADV_BENCH_FILE = "data/advbench/harmful_behaviors.csv"
 
 # Load and optionally slice the dataset
