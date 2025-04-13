@@ -69,7 +69,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
     all_total_times = []
     # Details per run: (adversarial_suffixes, model_outputs)
     all_details = []
-    all_llama_guard_unsafe = []
+    # all_llama_guard_unsafe = []
 
     # Loop over each (goal, target) pair
     for idx, (goal, target_text) in enumerate(advbench_pairs):
@@ -127,7 +127,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
                 pgd_times=[],
                 loss_times=[],
                 total_times=[],
-                llama_guard_unsafe=False,  # added field for safety check
+                # llama_guard_unsafe=False,  # added field for safety check
             )
             run_loss = float("nan")
             run_time = 0
@@ -150,7 +150,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
         all_loss_times.append(result.loss_times)
         all_total_times.append(result.total_times)
         all_details.append((result.adversarial_suffixes, result.model_outputs))
-        all_llama_guard_unsafe.append(result.llama_guard_unsafe)
+        # all_llama_guard_unsafe.append(result.llama_guard_unsafe)
 
     # --- Write aggregated CSV files ---
     losses_csv_path = os.path.join(experiment_folder, "losses.csv")
@@ -164,10 +164,10 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             for loss_list in all_losses:
                 row.append(loss_list[i] if i < len(loss_list) else "")
             writer.writerow(row)
-        unsafe_row = ["LlamaGuard Unsafe"] + [
-            str(flag) for flag in all_llama_guard_unsafe
-        ]
-        writer.writerow(unsafe_row)
+        # unsafe_row = ["LlamaGuard Unsafe"] + [
+        #     str(flag) for flag in all_llama_guard_unsafe
+        # ]
+        # writer.writerow(unsafe_row)
     logging.info(f"Saved aggregated losses CSV to {losses_csv_path}")
 
     details_csv_path = os.path.join(experiment_folder, "details.csv")
@@ -178,7 +178,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             header += [
                 f"Run {i+1} Suffix",
                 f"Run {i+1} Output",
-                f"Run {i+1} LlamaGuard Unsafe",
+                # f"Run {i+1} LlamaGuard Unsafe",
             ]
         writer.writerow(header)
         num_iterations = max((len(details[0]) for details in all_details), default=0)
@@ -187,8 +187,9 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             for idx, (adv_suffixes, model_outputs) in enumerate(all_details):
                 suffix = adv_suffixes[i] if i < len(adv_suffixes) else ""
                 output = model_outputs[i] if i < len(model_outputs) else ""
-                unsafe_val = all_llama_guard_unsafe[idx] if i == 0 else ""
-                row += [suffix, output, unsafe_val]
+                # unsafe_val = all_llama_guard_unsafe[idx] if i == 0 else ""
+                # row += [suffix, output, unsafe_val]
+                row += [suffix, output]
             writer.writerow(row)
     logging.info(f"Saved aggregated details CSV to {details_csv_path}")
 
@@ -262,16 +263,16 @@ def run_experiment(name, config_kwargs, advbench_pairs):
         writer.writerow(["Std Loss Time", std_loss])
         writer.writerow(["Average Total Time", avg_total])
         writer.writerow(["Std Total Time", std_total])
-        asr = (
-            (
-                sum(1 for flag in all_llama_guard_unsafe if flag)
-                / len(all_llama_guard_unsafe)
-            )
-            * 100
-            if all_llama_guard_unsafe
-            else float("nan")
-        )
-        writer.writerow(["ASR (%)", asr])
+        # asr = (
+        #     (
+        #         sum(1 for flag in all_llama_guard_unsafe if flag)
+        #         / len(all_llama_guard_unsafe)
+        #     )
+        #     * 100
+        #     if all_llama_guard_unsafe
+        #     else float("nan")
+        # )
+        # writer.writerow(["ASR (%)", asr])
     logging.info(f"Saved aggregated summary CSV to {summary_csv_path}")
 
     plt.figure(figsize=(10, 6), dpi=200)

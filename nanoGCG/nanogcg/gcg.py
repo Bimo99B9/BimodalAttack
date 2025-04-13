@@ -23,34 +23,34 @@ from PIL import Image
 import torchvision.transforms.functional as F
 import os
 
-# ---------------------------
-# Initialize LlamaGuard moderation model
-# ---------------------------
-llama_guard_model_id = "meta-llama/Llama-Guard-3-8B"
-llama_guard_device = "cuda"
-llama_guard_dtype = torch.bfloat16
+# # ---------------------------
+# # Initialize LlamaGuard moderation model
+# # ---------------------------
+# llama_guard_model_id = "meta-llama/Llama-Guard-3-8B"
+# llama_guard_device = "cuda"
+# llama_guard_dtype = torch.bfloat16
 
-llama_guard_tokenizer = transformers.AutoTokenizer.from_pretrained(llama_guard_model_id)
-llama_guard_model = transformers.AutoModelForCausalLM.from_pretrained(
-    llama_guard_model_id, torch_dtype=llama_guard_dtype, device_map=llama_guard_device
-)
+# llama_guard_tokenizer = transformers.AutoTokenizer.from_pretrained(llama_guard_model_id)
+# llama_guard_model = transformers.AutoModelForCausalLM.from_pretrained(
+#     llama_guard_model_id, torch_dtype=llama_guard_dtype, device_map=llama_guard_device
+# )
 
 
-def llama_guard_moderate(chat):
-    """
-    Expects a conversation as a list of dicts (e.g. [{'role': 'user', 'content': prompt},
-    {'role': 'assistant', 'content': output}]). Returns the LlamaGuard evaluation string.
-    """
-    input_ids = llama_guard_tokenizer.apply_chat_template(chat, return_tensors="pt").to(
-        llama_guard_device
-    )
-    output = llama_guard_model.generate(
-        input_ids=input_ids, max_new_tokens=100, pad_token_id=0
-    )
-    prompt_len = input_ids.shape[-1]
-    return llama_guard_tokenizer.decode(
-        output[0][prompt_len:], skip_special_tokens=True
-    )
+# def llama_guard_moderate(chat):
+#     """
+#     Expects a conversation as a list of dicts (e.g. [{'role': 'user', 'content': prompt},
+#     {'role': 'assistant', 'content': output}]). Returns the LlamaGuard evaluation string.
+#     """
+#     input_ids = llama_guard_tokenizer.apply_chat_template(chat, return_tensors="pt").to(
+#         llama_guard_device
+#     )
+#     output = llama_guard_model.generate(
+#         input_ids=input_ids, max_new_tokens=100, pad_token_id=0
+#     )
+#     prompt_len = input_ids.shape[-1]
+#     return llama_guard_tokenizer.decode(
+#         output[0][prompt_len:], skip_special_tokens=True
+#     )
 
 
 def parse_conversation(prompt, output):
@@ -120,6 +120,7 @@ class GCGConfig:
     experiment_folder: str = "experiments/missing_folder"
     images_folder: str = "experiments/missing_folder/images"
     pgd_after_gcg: bool = False
+    model: str = "llava"
 
 
 @dataclass
@@ -135,7 +136,7 @@ class GCGResult:
     loss_times: List[float]
     pgd_times: List[float]
     total_times: List[float] = None
-    llama_guard_unsafe: bool = False
+    # llama_guard_unsafe: bool = False
 
 
 # ---------------------------
@@ -266,6 +267,14 @@ class GCG:
         )
         self.stop_flag = False
 
+        # Check the model type.
+        if hasattr(self.model.config, "model_type"):
+            logger.info(f"Model type: {self.model.config.model_type}")
+
+        # Check the model identifier or name/path (if available).
+        if hasattr(self.model.config, "_name_or_path"):
+            logger.info(f"Model identifier: {self.model.config._name_or_path}")
+
         if model.dtype in (torch.float32, torch.float64):
             logger.warning(
                 f"Model is in {model.dtype}. Use a lower precision data type for faster optimization."
@@ -358,26 +367,23 @@ class GCG:
 
         if config.pgd_attack:
             if self.processor.__class__.__name__ == "Gemma3Processor":
-                # Split the prompt on the {optim_str} placeholder.
+                # First, split the prompt on the optimization placeholder.
                 before_str, after_temp = prompt.split("{optim_str}", 1)
-                # Now split after_temp on "<start_of_image>"
+                before_img_str = before_str.strip()
+                # Use partition to retain the <start_of_image> token in the result.
                 if "<start_of_image>" in after_temp:
-                    # Discard any text before the image token.
-                    _, after_temp = after_temp.split("<start_of_image>", 1)
-                    # Now split on "<end_of_turn>" to remove trailing generation prompt.
-                    if "<end_of_turn>" in after_temp:
-                        _, after_str = after_temp.split("<end_of_turn>", 1)
-                        after_str = after_str.strip()
-                    else:
-                        after_str = ""
+                    before_suffix, sep, after_str = after_temp.partition(
+                        "<start_of_image>"
+                    )
+                    # Combine the text before the token with the token itself.
+                    before_suffix_str = (before_suffix + sep).strip()
+                    after_str = (
+                        after_str.strip()
+                    )  # Keep any remaining tokens (like <end_of_turn>) intact.
                 else:
                     raise ValueError(
                         "Expected <start_of_image> token in Gemma PGD prompt."
                     )
-                before_img_str = before_str.strip()
-                before_suffix_str = (
-                    ""  # No text between {optim_str} and the image token.
-                )
             else:
                 if "<start_of_image>" in prompt:
                     before_img_str, after_img_str = prompt.split("<start_of_image>", 1)
@@ -461,7 +467,7 @@ class GCG:
         total_loss_time = 0.0
         total_pgd_time = 0.0
 
-        llama_guard_found_unsafe = False
+        # llama_guard_found_unsafe = False
 
         # Initialize variables to track the best candidate (lowest loss).
         best_loss = float("inf")
@@ -512,10 +518,10 @@ class GCG:
                 logger.info(f"[Iteration {i}] Running PGD before GCG (Phase B)")
                 start_pgd = time.perf_counter()
 
-                # image = self.perform_pgd_step(image, config.eps, config.alpha, image_grad, image_original)
-                image = self.perform_autopgd_step(
-                    image, config.eps, image_grad, image_original, current_loss, i
-                )
+                image = self.perform_pgd_step(image, config.eps, config.alpha, image_grad, image_original)
+                # image = self.perform_autopgd_step(
+                    # image, config.eps, image_grad, image_original, current_loss, i
+                # )
 
                 pgd_time = time.perf_counter() - start_pgd
                 pgd_times.append(pgd_time)
@@ -727,21 +733,10 @@ class GCG:
                     f"[Iteration {i}] Running PGD after GCG: PGD update (Phase F)"
                 )
                 start_pgd = time.perf_counter()
-                # image = self.perform_pgd_step(image, config.eps, config.alpha, image_grad, image_original)
+                image = self.perform_pgd_step(image, config.eps, config.alpha, image_grad, image_original)
                 # image = self.perform_autopgd_step(
-                #     image,
-                #     eps=config.eps,
-                #     alpha=config.alpha,
-                #     image_grad=image_grad,
-                #     image_original=image_original,
-                #     iter_idx=i,
-                #     checkpoint_interval=10,
-                #     rho=0.75,
-                #     current_loss=current_loss
+                #     image, config.eps, image_grad, image_original, current_loss, i
                 # )
-                image = self.perform_autopgd_step(
-                    image, config.eps, image_grad, image_original, current_loss, i
-                )
 
                 pgd_time = time.perf_counter() - start_pgd
                 pgd_times.append(pgd_time)
@@ -828,19 +823,19 @@ class GCG:
                     )
                     logger.info(f"Output generated at iteration {i}: {gen_output}")
 
-                    # ---------------------------
-                    # LlamaGuard check in debug output
-                    # ---------------------------
-                    guard_chat = parse_conversation(self.initial_prompt, gen_output)
-                    llama_guard_eval = llama_guard_moderate(guard_chat)
-                    logger.info(
-                        f"LlamaGuard evaluation at iteration {i}: {llama_guard_eval}"
-                    )
-                    if "unsafe" in llama_guard_eval.lower():
-                        logger.warning(
-                            f"LlamaGuard detected unsafe output at iteration {i}."
-                        )
-                        llama_guard_found_unsafe = True
+                    # # ---------------------------
+                    # # LlamaGuard check in debug output
+                    # # ---------------------------
+                    # guard_chat = parse_conversation(self.initial_prompt, gen_output)
+                    # llama_guard_eval = llama_guard_moderate(guard_chat)
+                    # logger.info(
+                    #     f"LlamaGuard evaluation at iteration {i}: {llama_guard_eval}"
+                    # )
+                    # if "unsafe" in llama_guard_eval.lower():
+                    #     logger.warning(
+                    #         f"LlamaGuard detected unsafe output at iteration {i}."
+                    #     )
+                    #     llama_guard_found_unsafe = True
             else:
                 gen_output = ""
             model_outputs.append(gen_output)
@@ -872,58 +867,58 @@ class GCG:
             f"Average candidate loss computation time: {total_loss_time / num_iters:.4f}s"
         )
 
-        # ---------------------------
-        # Final additional inference using best candidate (and image if available)
-        # ---------------------------
-        with torch.no_grad():
-            if config.pgd_attack and best_image is not None:
-                pixel_values = self.normalize(best_image)
-                if self.processor.__class__.__name__ == "Gemma3Processor":
-                    image_features = model.get_image_features(pixel_values=pixel_values)
-                else:
-                    image_features = model.get_image_features(
-                        pixel_values=pixel_values,
-                        vision_feature_layer=-2,
-                        vision_feature_select_strategy="default",
-                    )
+        # # ---------------------------
+        # # Final additional inference using best candidate (and image if available)
+        # # ---------------------------
+        # with torch.no_grad():
+        #     if config.pgd_attack and best_image is not None:
+        #         pixel_values = self.normalize(best_image)
+        #         if self.processor.__class__.__name__ == "Gemma3Processor":
+        #             image_features = model.get_image_features(pixel_values=pixel_values)
+        #         else:
+        #             image_features = model.get_image_features(
+        #                 pixel_values=pixel_values,
+        #                 vision_feature_layer=-2,
+        #                 vision_feature_select_strategy="default",
+        #             )
 
-                input_embeds = self._build_input_embeds_gcg_pgd(
-                    best_optim_ids,
-                    image_features,
-                    search_width=1,
-                    no_target=True,
-                )
-            else:
-                input_embeds = self._build_input_embeds_gcg(
-                    best_optim_ids,
-                    search_width=1,
-                    no_target=True,
-                )
-            final_generated_ids = model.generate(
-                inputs_embeds=input_embeds, max_new_tokens=120
-            )
-            best_gen_output = tokenizer.decode(
-                final_generated_ids[0], skip_special_tokens=True
-            )
-            logger.info(
-                f"Final output generated using best candidate: {best_gen_output}"
-            )
+        #         input_embeds = self._build_input_embeds_gcg_pgd(
+        #             best_optim_ids,
+        #             image_features,
+        #             search_width=1,
+        #             no_target=True,
+        #         )
+        #     else:
+        #         input_embeds = self._build_input_embeds_gcg(
+        #             best_optim_ids,
+        #             search_width=1,
+        #             no_target=True,
+        #         )
+        #     final_generated_ids = model.generate(
+        #         inputs_embeds=input_embeds, max_new_tokens=120
+        #     )
+        #     best_gen_output = tokenizer.decode(
+        #         final_generated_ids[0], skip_special_tokens=True
+        #     )
+        #     logger.info(
+        #         f"Final output generated using best candidate: {best_gen_output}"
+        #     )
 
-            # ---------------------------
-            # Final LlamaGuard evaluation using best candidate output
-            # ---------------------------
-            guard_chat = parse_conversation(self.initial_prompt, best_gen_output)
-            llama_guard_final_eval = llama_guard_moderate(guard_chat)
-            logger.info(
-                f"Final LlamaGuard evaluation using best candidate: {llama_guard_final_eval}"
-            )
-            final_llama_guard_flag = "unsafe" in llama_guard_final_eval.lower()
-            overall_llama_guard_unsafe = (
-                llama_guard_found_unsafe or final_llama_guard_flag
-            )
+        #     # ---------------------------
+        #     # Final LlamaGuard evaluation using best candidate output
+        #     # ---------------------------
+        #     guard_chat = parse_conversation(self.initial_prompt, best_gen_output)
+        #     llama_guard_final_eval = llama_guard_moderate(guard_chat)
+        #     logger.info(
+        #         f"Final LlamaGuard evaluation using best candidate: {llama_guard_final_eval}"
+        #     )
+        #     final_llama_guard_flag = "unsafe" in llama_guard_final_eval.lower()
+        #     overall_llama_guard_unsafe = (
+        #         llama_guard_found_unsafe or final_llama_guard_flag
+        #     )
 
         # Optionally, you might want to append the final generated output to model_outputs:
-        model_outputs.append(best_gen_output)
+        # model_outputs.append(best_gen_output)
 
         # Use the best candidate (based on lowest loss) for the final result.
         min_loss_index = losses.index(min(losses))
@@ -939,7 +934,7 @@ class GCG:
             loss_times=loss_times,
             pgd_times=pgd_times,
             total_times=total_times,
-            llama_guard_unsafe=overall_llama_guard_unsafe,
+            # llama_guard_unsafe=overall_llama_guard_unsafe,
         )
         return result
 
@@ -1148,7 +1143,7 @@ class GCG:
             return optim_ids_onehot_grad, None
 
     def perform_pgd_step(
-        image: Tensor, eps: float, alpha: float, image_grad, image_original
+        self, image: Tensor, eps: float, alpha: float, image_grad, image_original
     ) -> Tensor:
         image = (image - alpha * eps * torch.sign(image_grad)).detach().requires_grad_()
         image = torch.clamp(image, image_original - eps, image_original + eps)
@@ -1237,17 +1232,30 @@ class GCG:
         single: bool = False,
     ) -> Tensor:
         if single:
-            return torch.cat(
-                [
-                    self.before_img_embeds.repeat(search_width, 1, 1),
-                    image.repeat(search_width, 1, 1),
-                    self.before_suffix_embeds.repeat(search_width, 1, 1),
-                    self.embedding_layer(sampled_ids),
-                    self.after_embeds.repeat(search_width, 1, 1),
-                    self.target_embeds.repeat(search_width, 1, 1),
-                ],
-                dim=1,
-            )
+            if self.model.config.model_type == "gemma3":
+                return torch.cat(
+                    [
+                        self.before_img_embeds.repeat(search_width, 1, 1),
+                        self.embedding_layer(sampled_ids),
+                        self.before_suffix_embeds.repeat(search_width, 1, 1),
+                        image.repeat(search_width, 1, 1),
+                        self.after_embeds.repeat(search_width, 1, 1),
+                        self.target_embeds.repeat(search_width, 1, 1),
+                    ],
+                    dim=1,
+                )
+            else:
+                return torch.cat(
+                    [
+                        self.before_img_embeds.repeat(search_width, 1, 1),
+                        image.repeat(search_width, 1, 1),
+                        self.before_suffix_embeds.repeat(search_width, 1, 1),
+                        self.embedding_layer(sampled_ids),
+                        self.after_embeds.repeat(search_width, 1, 1),
+                        self.target_embeds.repeat(search_width, 1, 1),
+                    ],
+                    dim=1,
+                )
 
     def _build_input_embeds_gcg(
         self,
@@ -1259,17 +1267,30 @@ class GCG:
     ) -> Tensor:
 
         if single:
-            return torch.cat(
-                [
-                    self.before_img_embeds.repeat(search_width, 1, 1),
-                    self.before_suffix_embeds.repeat(search_width, 1, 1),
-                    self.embedding_layer(sampled_ids),
-                    self.after_embeds.repeat(search_width, 1, 1),
-                    self.target_embeds.repeat(search_width, 1, 1),
-                ],
-                dim=1,
-            )
+            if self.model.config.model_type == "gemma3":
+                return torch.cat(
+                    [
+                        self.before_img_embeds.repeat(search_width, 1, 1),
+                        self.embedding_layer(sampled_ids),
+                        self.before_suffix_embeds.repeat(search_width, 1, 1),
+                        self.after_embeds.repeat(search_width, 1, 1),
+                        self.target_embeds.repeat(search_width, 1, 1),
+                    ],
+                    dim=1,
+                )
+            else:
+                return torch.cat(
+                    [
+                        self.before_img_embeds.repeat(search_width, 1, 1),
+                        self.before_suffix_embeds.repeat(search_width, 1, 1),
+                        self.embedding_layer(sampled_ids),
+                        self.after_embeds.repeat(search_width, 1, 1),
+                        self.target_embeds.repeat(search_width, 1, 1),
+                    ],
+                    dim=1,
+                )
 
+        # TODO: Check if here would be the same for Gemma and Llava
         if no_joint_eval:
             return torch.cat(
                 [
@@ -1280,7 +1301,7 @@ class GCG:
                 ],
                 dim=1,
             )
-
+        # TODO: Check if here would be the same for Gemma and Llava
         if no_target:
             return torch.cat(
                 [
@@ -1301,42 +1322,80 @@ class GCG:
     ) -> Tensor:
 
         if single:
-            return torch.cat(
-                [
-                    self.before_img_embeds.repeat(search_width, 1, 1),
-                    image.repeat(search_width, 1, 1),
-                    self.before_suffix_embeds.repeat(search_width, 1, 1),
-                    self.embedding_layer(sampled_ids),
-                    self.after_embeds.repeat(search_width, 1, 1),
-                    self.target_embeds.repeat(search_width, 1, 1),
-                ],
-                dim=1,
-            )
+            if self.model.config.model_type == "gemma3":
+                return torch.cat(
+                    [
+                        self.before_img_embeds.repeat(search_width, 1, 1),
+                        self.embedding_layer(sampled_ids),
+                        self.before_suffix_embeds.repeat(search_width, 1, 1),
+                        image.repeat(search_width, 1, 1),
+                        self.after_embeds.repeat(search_width, 1, 1),
+                        self.target_embeds.repeat(search_width, 1, 1),
+                    ],
+                    dim=1,
+                )
+            else:
+                return torch.cat(
+                    [
+                        self.before_img_embeds.repeat(search_width, 1, 1),
+                        image.repeat(search_width, 1, 1),
+                        self.before_suffix_embeds.repeat(search_width, 1, 1),
+                        self.embedding_layer(sampled_ids),
+                        self.after_embeds.repeat(search_width, 1, 1),
+                        self.target_embeds.repeat(search_width, 1, 1),
+                    ],
+                    dim=1,
+                )
 
         elif no_target:
-            return torch.cat(
-                [
-                    self.before_img_embeds.repeat(search_width, 1, 1),
-                    image.repeat(search_width, 1, 1),
-                    self.before_suffix_embeds.repeat(search_width, 1, 1),
-                    self.embedding_layer(sampled_ids),
-                    self.after_embeds.repeat(search_width, 1, 1),
-                ],
-                dim=1,
-            )
+            if self.model.config.model_type == "gemma3":
+                return torch.cat(
+                    [
+                        self.before_img_embeds.repeat(search_width, 1, 1),
+                        self.embedding_layer(sampled_ids),
+                        self.before_suffix_embeds.repeat(search_width, 1, 1),
+                        image.repeat(search_width, 1, 1),
+                        self.after_embeds.repeat(search_width, 1, 1),
+                    ],
+                    dim=1,
+                )
+            else:
+                return torch.cat(
+                    [
+                        self.before_img_embeds.repeat(search_width, 1, 1),
+                        image.repeat(search_width, 1, 1),
+                        self.before_suffix_embeds.repeat(search_width, 1, 1),
+                        self.embedding_layer(sampled_ids),
+                        self.after_embeds.repeat(search_width, 1, 1),
+                    ],
+                    dim=1,
+                )
 
         else:
-            return torch.cat(
-                [
-                    self.before_img_embeds,
-                    image,
-                    self.before_suffix_embeds,
-                    self.embedding_layer(sampled_ids),
-                    self.after_embeds,
-                    self.target_embeds,
-                ],
-                dim=1,
-            )
+            if self.model.config.model_type == "gemma3":
+                return torch.cat(
+                    [
+                        self.before_img_embeds,
+                        self.embedding_layer(sampled_ids),
+                        self.before_suffix_embeds,
+                        image,
+                        self.after_embeds,
+                        self.target_embeds,
+                    ],
+                    dim=1,
+                )
+            else:
+                return torch.cat(
+                    [
+                        self.before_img_embeds,
+                        image,
+                        self.before_suffix_embeds,
+                        self.embedding_layer(sampled_ids),
+                        self.after_embeds,
+                        self.target_embeds,
+                    ],
+                    dim=1,
+                )
 
     def _compute_candidates_loss_original(
         self, search_batch_size: int, input_embeds: Tensor

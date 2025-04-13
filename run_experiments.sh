@@ -18,21 +18,38 @@ set -e
 #     --joint_eval False \
 #     > logs/experiments_llava_pgd.out 2>&1
 
-# # # # 2. Only GCG (GRADS -> logs/GCG)
-# # CUDA_VISIBLE_DEVICES=4 python experiments.py \
-# #     --name "GCG Only" \
-# #     --num_steps 250 \
-# #     --search_width 512 \
-# #     --dynamic_search False \
-# #     --min_search_width 512 \
-# #     --pgd_attack False \
-# #     --gcg_attack True \
-# #     --pgd_after_gcg False \
-# #     --alpha "0/255" \
-# #     --eps "0/255" \
-# #     --debug_output False \
-# #     --joint_eval False \
-# #     > logs/experiments_gcg.out 2>&1
+# 2. Only GCG (GRADS -> logs/GCG)
+# CUDA_VISIBLE_DEVICES=1 python experiments.py \
+#     --name "Llava - GCG Only" \
+#     --num_steps 250 \
+#     --search_width 512 \
+#     --dynamic_search False \
+#     --min_search_width 512 \
+#     --pgd_attack False \
+#     --gcg_attack True \
+#     --pgd_after_gcg False \
+#     --alpha "0/255" \
+#     --eps "0/255" \
+#     --debug_output False \
+#     --joint_eval False \
+#     --model "llava" \
+#     > logs/experiments_llava_gcg.out 2>&1
+
+# CUDA_VISIBLE_DEVICES=7 python experiments.py \
+#     --name "Gemma - GCG Only (New prompt)" \
+#     --num_steps 250 \
+#     --search_width 512 \
+#     --dynamic_search False \
+#     --min_search_width 512 \
+#     --pgd_attack False \
+#     --gcg_attack True \
+#     --pgd_after_gcg False \
+#     --alpha "0/255" \
+#     --eps "0/255" \
+#     --debug_output False \
+#     --joint_eval False \
+#     --model "gemma" \
+#     > logs/experiments_gemma_gcg_new.out 2>&1
 
 # # # 3. Both PGD and GCG (GRADS -> logs/PGD -> logs/GRADS -> logs/GCG)
 # # CUDA_VISIBLE_DEVICES=4 python experiments.py \
@@ -138,9 +155,9 @@ set -e
 
 # ### Gemma experiments
 
-# # 1. Only PGD (GRADS -> logs/PGD)
+# 1. Only PGD (GRADS -> logs/PGD)
 # CUDA_VISIBLE_DEVICES=5 python experiments.py \
-#     --name "Gemma - PGD Only" \
+#     --name "Gemma - APGD Only" \
 #     --num_steps 600 \
 #     --search_width 0 \
 #     --dynamic_search False \
@@ -148,15 +165,16 @@ set -e
 #     --pgd_attack True \
 #     --gcg_attack False \
 #     --pgd_after_gcg False \
-#     --alpha "4/255" \
+#     --alpha "0/255" \
 #     --eps "64/255" \
 #     --debug_output False \
 #     --joint_eval False \
-#     > logs/experiments_gemma_pgd.out 2>&1
+#     --model "gemma" \
+#     > logs/experiments_gemma_apgd.out 2>&1
 
 # # 2. Only GCG (GRADS -> logs/GCG)
-# CUDA_VISIBLE_DEVICES=6 python experiments.py \
-#     --name "Gemma - GCG Only" \
+# CUDA_VISIBLE_DEVICES=7 python experiments.py \
+#     --name "Gemma - GCG Only (New prompt)" \
 #     --num_steps 250 \
 #     --search_width 512 \
 #     --dynamic_search False \
@@ -168,11 +186,62 @@ set -e
 #     --eps "0/255" \
 #     --debug_output False \
 #     --joint_eval False \
-#     > logs/experiments_gemma_gcg.out 2>&1
+#     --model "gemma" \
+#     > logs/experiments_gemma_gcg_new.out 2>&1
 
 # # 3. Both PGD and GCG (GRADS -> logs/PGD -> logs/GRADS -> logs/GCG)
 # CUDA_VISIBLE_DEVICES=7 python experiments.py \
-#     --name "Gemma - PGD + GCG" \
+#     --name "Gemma - PGD + GCG (New prompt)" \
+#     --num_steps 250 \
+#     --search_width 512 \
+#     --dynamic_search False \
+#     --min_search_width 512 \
+#     --pgd_attack True \
+#     --gcg_attack True \
+#     --pgd_after_gcg False \
+#     --alpha "0/255" \
+#     --eps "64/255" \
+#     --debug_output False \
+#     --joint_eval False \
+#     --model "gemma" \
+#     > logs/experiments_gemma_pgd_gcg_new.out 2>&1
+
+# 4. Joint eval with PGD and GCG (GRADS -> logs/PGD -> logs/GRADS -> logs/GCG)
+
+# CUDA_VISIBLE_DEVICES=6 python experiments.py \
+#     --name "Gemma - Joint Eval (New prompt, DS, APGD)" \
+#     --num_steps 250 \
+#     --search_width 512 \
+#     --dynamic_search True \
+#     --min_search_width 64 \
+#     --pgd_attack True \
+#     --gcg_attack True \
+#     --pgd_after_gcg False \
+#     --alpha "0/255" \
+#     --eps "64/255" \
+#     --debug_output False \
+#     --joint_eval True \
+#     --model "gemma" \
+#     > logs/experiments_gemma_pgd_gcg_jointeval_new.out 2>&1
+
+# CUDA_VISIBLE_DEVICES=6 python experiments.py \
+#     --name "Gemma - Joint Eval (New prompt, APGD)" \
+#     --num_steps 250 \
+#     --search_width 512 \
+#     --dynamic_search True \
+#     --min_search_width 64 \
+#     --pgd_attack True \
+#     --gcg_attack True \
+#     --pgd_after_gcg False \
+#     --alpha "0/255" \
+#     --eps "64/255" \
+#     --debug_output False \
+#     --joint_eval True \
+#     --model "gemma" \
+#     > logs/experiments_gemma_pgd_gcg_jointeval_new.out 2>&1
+
+# CUDA_VISIBLE_DEVICES=5 python experiments.py \
+#     --name "Gemma - Joint Eval (New Prompt) (Wout APGD)" \
 #     --num_steps 250 \
 #     --search_width 512 \
 #     --dynamic_search False \
@@ -183,25 +252,25 @@ set -e
 #     --alpha "4/255" \
 #     --eps "64/255" \
 #     --debug_output False \
-#     --joint_eval False \
-#     >experiments_gemma_pgd_gcg.out 2>&1
-
-# 4. Joint eval with PGD and GCG (GRADS -> logs/PGD -> logs/GRADS -> logs/GCG)
+#     --joint_eval True \
+#     --model "gemma" \
+#     > logs/experiments_gemma_pgd_gcg_jointeval_new_2.out 2>&1
 
 # CUDA_VISIBLE_DEVICES=6 python experiments.py \
-#     --name "Gemma - Joint Eval DS" \
-#     --num_steps 250 \
-#     --search_width 512 \
-#     --dynamic_search True \
-#     --min_search_width 32 \
+#     --name "Gemma - APGD Only" \
+#     --num_steps 400 \
+#     --search_width 0 \
+#     --dynamic_search False \
+#     --min_search_width 0 \
 #     --pgd_attack True \
-#     --gcg_attack True \
+#     --gcg_attack False \
 #     --pgd_after_gcg False \
-#     --alpha "4/255" \
+#     --alpha "0/255" \
 #     --eps "64/255" \
 #     --debug_output False \
-#     --joint_eval True \
-#     >experiments_gemma_pgd_gcg_jointeval_ds.out 2>&1
+#     --joint_eval False \
+#     --model "gemma" \
+#     > logs/experiments_gemma_apgd.out 2>&1
 
 #####
 
@@ -220,21 +289,21 @@ set -e
 #     --joint_eval False \
 #     > logs/experiments_llava_autopgd.out 2>&1
 
-CUDA_VISIBLE_DEVICES=4 python experiments.py \
-    --name "Llava - Auto-PGD 2" \
-    --model "llava" \
-    --num_steps 600 \
-    --search_width 0 \
-    --dynamic_search False \
-    --min_search_width 0 \
-    --pgd_attack True \
-    --gcg_attack False \
-    --pgd_after_gcg False \
-    --alpha "0/255" \
-    --eps "64/255" \
-    --debug_output False \
-    --joint_eval False \
-    >logs/experiments_llava_autopgd_2.out 2>&1
+# CUDA_VISIBLE_DEVICES=7 python experiments.py \
+#     --name "Gemma - PGD + GCG" \
+#     --model "gemma" \
+#     --num_steps 250 \
+#     --search_width 512 \
+#     --dynamic_search False \
+#     --min_search_width 0 \
+#     --pgd_attack True \
+#     --gcg_attack True \
+#     --pgd_after_gcg False \
+#     --alpha "0/255" \
+#     --eps "64/255" \
+#     --debug_output False \
+#     --joint_eval False \
+#     >logs/experiments_gemma_pgdgcg.out 2>&1
 
 # CUDA_VISIBLE_DEVICES=4 python experiments.py \
 #     --name "Gemma - Auto-PGD" \
@@ -265,3 +334,35 @@ CUDA_VISIBLE_DEVICES=4 python experiments.py \
 #     --debug_output False \
 #     --joint_eval False \
 #     > logs/experiments_gemma_autopgd_2.out 2>&1
+
+# CUDA_VISIBLE_DEVICES=3 python experiments.py \
+#     --name "Gemma - Joint Eval Long (Wout APGD)" \
+#     --num_steps 500 \
+#     --search_width 512 \
+#     --dynamic_search False \
+#     --min_search_width 512 \
+#     --pgd_attack True \
+#     --gcg_attack True \
+#     --pgd_after_gcg False \
+#     --alpha "4/255" \
+#     --eps "64/255" \
+#     --debug_output False \
+#     --joint_eval True \
+#     --model "gemma" \
+#     > logs/experiments_gemma_pgd_gcg_jointeval_3.out 2>&1
+
+CUDA_VISIBLE_DEVICES=2 python experiments.py \
+    --name "Llava - PGD + GCG (Wout APGD)" \
+    --num_steps 250 \
+    --search_width 512 \
+    --dynamic_search False \
+    --min_search_width 0 \
+    --pgd_attack True \
+    --gcg_attack True \
+    --pgd_after_gcg False \
+    --alpha "4/255" \
+    --eps "64/255" \
+    --debug_output False \
+    --joint_eval True \
+    --model "llava" \
+    > logs/experiments_llava_pgd_gcg_jointeval.out 2>&1
