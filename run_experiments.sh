@@ -380,4 +380,5 @@ CUDA_VISIBLE_DEVICES=0 python experiments.py \
     --eps "64/255" \
     --debug_output False \
     --joint_eval False \
+    --model "gemma" \
     > logs/experiments_gemma_pgd.out 2>&1
