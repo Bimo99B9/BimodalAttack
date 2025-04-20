@@ -4,8 +4,9 @@ import logging
 import argparse
 import torch
 import re
-from PIL import Image
+import matplotlib.pyplot as plt
 import pandas as pd
+from PIL import Image
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from utils.experiments_utils import load_model_and_processor
@@ -117,6 +118,7 @@ def main():
     logging.info(f"Evaluating experiment: {exp_folder}")
     logging.info(f"Evaluation results will be saved in: {evaluation_dir}")
 
+    # Load experiment parameters from CSV.
     params = load_parameters(exp_dir)
     num_prompts = int(params["num_prompts"])
     logging.info(f"Number of experiments (prompts): {num_prompts}")
@@ -302,6 +304,53 @@ def main():
         f.write(f"Overall unsafe outputs: {overall_unsafe_count} / {overall_total}\n")
         f.write(f"Overall ASR (%): {overall_ASR:.2f}\n")
     logging.info(f"Overall results saved to: {overall_file}")
+
+    # ---- Generate Aggregated Loss Plot ----
+    losses_csv_path = os.path.join(exp_dir, "losses.csv")
+    if os.path.exists(losses_csv_path):
+        try:
+            losses_df = pd.read_csv(losses_csv_path)
+            plt.figure(figsize=(10, 6), dpi=200)
+
+            plot_title = params.get("name", "Aggregated Loss Plot")
+
+            iterations = losses_df["Iteration"].tolist()
+            for col in losses_df.columns:
+                if col == "Iteration":
+                    continue
+                losses = pd.to_numeric(losses_df[col], errors="coerce").tolist()
+                plt.plot(iterations, losses, linestyle="-", linewidth=1)
+
+            plt.xlabel("Iteration")
+            plt.ylabel("Loss")
+            plt.title(plot_title)
+            plt.ylim(0, losses_df.drop(columns="Iteration").max().max())
+
+            config_text = "\n".join(
+                f"{k}: {v}" for k, v in params.items() if not k.endswith("_str")
+            )
+            ax = plt.gca()
+            props = dict(boxstyle="round", facecolor="white", alpha=0.5)
+            ax.text(
+                0.98,
+                0.98,
+                config_text,
+                transform=ax.transAxes,
+                fontsize=8,
+                verticalalignment="top",
+                horizontalalignment="right",
+                bbox=props,
+            )
+
+            loss_plot_path = os.path.join(exp_dir, "losses_aggregated_evaluation.png")
+            plt.savefig(loss_plot_path, bbox_inches="tight")
+            plt.close()
+            logging.info(f"Saved aggregated loss plot to {loss_plot_path}")
+        except Exception as e:
+            logging.error(f"Error generating loss plot: {e}")
+    else:
+        logging.error("Losses CSV file not found, cannot generate loss plot.")
+
     logging.info("Evaluation complete.")
     logging.info(f"Overall ASR (%): {overall_ASR:.2f}")
 
