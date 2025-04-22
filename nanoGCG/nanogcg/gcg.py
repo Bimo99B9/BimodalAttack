@@ -1,10 +1,7 @@
 import copy
 import gc
 import logging
-import queue
-import threading
 import time
-from contextlib import contextmanager
 
 from dataclasses import dataclass
 import numpy as np
@@ -18,59 +15,9 @@ from transformers import set_seed
 
 from nanogcg.utils import INIT_CHARS, find_executable_batch_size, get_nonascii_toks
 
-import requests
 from PIL import Image
 import torchvision.transforms.functional as F
 import os
-
-# # ---------------------------
-# # Initialize LlamaGuard moderation model
-# # ---------------------------
-# llama_guard_model_id = "meta-llama/Llama-Guard-3-8B"
-# llama_guard_device = "cuda"
-# llama_guard_dtype = torch.bfloat16
-
-# llama_guard_tokenizer = transformers.AutoTokenizer.from_pretrained(llama_guard_model_id)
-# llama_guard_model = transformers.AutoModelForCausalLM.from_pretrained(
-#     llama_guard_model_id, torch_dtype=llama_guard_dtype, device_map=llama_guard_device
-# )
-
-
-# def llama_guard_moderate(chat):
-#     """
-#     Expects a conversation as a list of dicts (e.g. [{'role': 'user', 'content': prompt},
-#     {'role': 'assistant', 'content': output}]). Returns the LlamaGuard evaluation string.
-#     """
-#     input_ids = llama_guard_tokenizer.apply_chat_template(chat, return_tensors="pt").to(
-#         llama_guard_device
-#     )
-#     output = llama_guard_model.generate(
-#         input_ids=input_ids, max_new_tokens=100, pad_token_id=0
-#     )
-#     prompt_len = input_ids.shape[-1]
-#     return llama_guard_tokenizer.decode(
-#         output[0][prompt_len:], skip_special_tokens=True
-#     )
-
-
-def parse_conversation(prompt, output):
-    """
-    We want this format for LlamaGuard:
-
-    moderate([
-    {"role": "user", "content": "I forgot how to kill a process in Linux, can you help?"},
-    {"role": "assistant", "content": "Sure! To kill a process in Linux, you can use the kill command followed by the process ID (PID) of the process you want to terminate."},
-    ])
-
-    And we provide "prompt", which is the content of the user message, and "output", which is the content of the assistant message.
-    """
-    result = [
-        {"role": "user", "content": prompt},
-        {"role": "assistant", "content": output.strip()},
-    ]
-
-    logger.info(f"Parsed conversation for LlamaGuard: {result}")
-    return result
 
 
 # ---------------------------
@@ -518,9 +465,11 @@ class GCG:
                 logger.info(f"[Iteration {i}] Running PGD before GCG (Phase B)")
                 start_pgd = time.perf_counter()
 
-                image = self.perform_pgd_step(image, config.eps, config.alpha, image_grad, image_original)
+                image = self.perform_pgd_step(
+                    image, config.eps, config.alpha, image_grad, image_original
+                )
                 # image = self.perform_autopgd_step(
-                    # image, config.eps, image_grad, image_original, current_loss, i
+                # image, config.eps, image_grad, image_original, current_loss, i
                 # )
 
                 pgd_time = time.perf_counter() - start_pgd
@@ -530,8 +479,8 @@ class GCG:
                     f"[Iteration {i}] Phase B (PGD update) completed in {pgd_time:.4f}s"
                 )
 
-                ### Phase C - Recompute gradient after PGD update.
-                if config.gcg_attack:
+                ### Phase C - Recompute gradient after PGD update. Do not recompute gradients if using joint eval.
+                if config.gcg_attack and not config.joint_eval:
                     start_grad = time.perf_counter()
                     optim_ids_onehot_grad, image_grad = self.compute_gradient(
                         optim_ids, image
@@ -733,7 +682,9 @@ class GCG:
                     f"[Iteration {i}] Running PGD after GCG: PGD update (Phase F)"
                 )
                 start_pgd = time.perf_counter()
-                image = self.perform_pgd_step(image, config.eps, config.alpha, image_grad, image_original)
+                image = self.perform_pgd_step(
+                    image, config.eps, config.alpha, image_grad, image_original
+                )
                 # image = self.perform_autopgd_step(
                 #     image, config.eps, image_grad, image_original, current_loss, i
                 # )
@@ -1400,36 +1351,79 @@ class GCG:
     def _compute_candidates_loss_original(
         self, search_batch_size: int, input_embeds: Tensor
     ) -> Tensor:
-        all_loss = []
-        for i in range(0, input_embeds.shape[0], search_batch_size):
-            with torch.no_grad():
-                input_embeds_batch = input_embeds[i : i + search_batch_size]
-                current_batch_size = input_embeds_batch.shape[0]
+        # all_loss = []
+        # for i in range(0, input_embeds.shape[0], search_batch_size):
+        #     with torch.no_grad():
+        #         input_embeds_batch = input_embeds[i : i + search_batch_size]
+        #         current_batch_size = input_embeds_batch.shape[0]
 
-                outputs = self.model(inputs_embeds=input_embeds_batch)
-                logits = outputs.logits
-                tmp = input_embeds.shape[1] - self.target_ids.shape[1]
-                shift_logits = logits[..., tmp - 1 : -1, :].contiguous()
-                shift_labels = self.target_ids.repeat(current_batch_size, 1)
+        #         outputs = self.model(inputs_embeds=input_embeds_batch)
+        #         logits = outputs.logits
+        #         tmp = input_embeds.shape[1] - self.target_ids.shape[1]
+        #         shift_logits = logits[..., tmp - 1 : -1, :].contiguous()
+        #         shift_labels = self.target_ids.repeat(current_batch_size, 1)
 
-                loss = torch.nn.functional.cross_entropy(
-                    shift_logits.view(-1, shift_logits.size(-1)),
-                    shift_labels.view(-1),
-                    reduction="none",
-                )
-                loss = loss.view(current_batch_size, -1).mean(dim=-1)
-                all_loss.append(loss)
-                if self.config.early_stop:
-                    if torch.any(
-                        torch.all(
-                            torch.argmax(shift_logits, dim=-1) == shift_labels, dim=-1
-                        )
-                    ).item():
-                        self.stop_flag = True
-                del outputs
-                gc.collect()
-                torch.cuda.empty_cache()
-        return torch.cat(all_loss, dim=0)
+        #         loss = torch.nn.functional.cross_entropy(
+        #             shift_logits.view(-1, shift_logits.size(-1)),
+        #             shift_labels.view(-1),
+        #             reduction="none",
+        #         )
+        #         loss = loss.view(current_batch_size, -1).mean(dim=-1)
+        #         all_loss.append(loss)
+        #         if self.config.early_stop:
+        #             if torch.any(
+        #                 torch.all(
+        #                     torch.argmax(shift_logits, dim=-1) == shift_labels, dim=-1
+        #                 )
+        #             ).item():
+        #                 self.stop_flag = True
+        #         del outputs
+        #         gc.collect()
+        #         torch.cuda.empty_cache()
+        # return torch.cat(all_loss, dim=0)
+        """
+        Computes per‑candidate CE loss (mean over tokens) in one forward.
+        """
+        with torch.no_grad():
+            # 1) forward once
+            outputs = self.model(inputs_embeds=input_embeds)
+            logits  = outputs.logits                               # (B, L, V)
+
+            # 2) slice out the positions that align with target_ids
+            seq_len = input_embeds.size(1)
+            tgt_len = self.target_ids.numel()
+            offset  = seq_len - tgt_len
+            # shift_logits: (B, tgt_len, V)
+            shift_logits = logits[..., offset - 1 : -1, :].contiguous()
+
+            # 3) build a (B, tgt_len) label tensor
+            tgt = self.target_ids.squeeze()
+            if tgt.dim() != 1:
+                tgt = tgt.view(-1)
+            batch_size = shift_logits.size(0)
+            shift_labels = tgt.unsqueeze(0).expand(batch_size, -1)
+            # ensure contiguous in memory
+            shift_labels = shift_labels.contiguous()
+
+            # 4) flatten logits & labels safely
+            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+            flat_labels = shift_labels.reshape(-1)
+
+            # 5) compute per‑token CE, then mean over each sequence
+            loss_flat = torch.nn.functional.cross_entropy(
+                flat_logits,
+                flat_labels,
+                reduction="none"
+            )
+            losses = loss_flat.view(batch_size, -1).mean(dim=1)
+
+            # 6) early‑stop check
+            if self.config.early_stop:
+                correct = torch.argmax(shift_logits, dim=-1) == shift_labels
+                if torch.any(correct.all(dim=-1)):
+                    self.stop_flag = True
+
+        return losses
 
     def _save_image(self, image, path):
         image = image.squeeze(0).detach().cpu().numpy()
