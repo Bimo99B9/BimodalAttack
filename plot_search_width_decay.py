@@ -1,40 +1,24 @@
-import os
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Define different configurations
-configurations = [
-    (500, 512),
-    (500, 256),
-    (250, 512),
-    (250, 256),
-]
-
-# Define minimum search widths
-min_search_widths = [32, 64, 128, 256]
-
-
-# Create subplots
+configs = [(500, 512), (500, 256), (250, 512), (250, 256)]
+min_widths = [32, 64, 128, 256]
 fig, axes = plt.subplots(2, 2, figsize=(12, 10), sharex=True, sharey=True)
-axes = axes.flatten()
 
-# Generate plots for each configuration
-for ax, (num_steps, initial_search_width) in zip(axes, configurations):
-    steps = np.arange(num_steps)
-    for min_w in min_search_widths:
-        widths = [max(min_w, int(initial_search_width * (1 - i / num_steps))) for i in steps]
-        ax.plot(steps, widths, label=f"Min: {min_w}")
-    
-    ax.set_title(f"Init: {initial_search_width}, Steps: {num_steps}")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Search Width")
+for ax, (n_steps, init_width) in zip(axes.flatten(), configs):
+    steps = np.arange(n_steps)
+    for w in min_widths:
+        widths = np.maximum(w, (init_width * (1 - steps / n_steps)).astype(int))
+        ax.plot(steps, widths, label=f"Min: {w}")
+    ax.set(
+        title=f"Init: {init_width}, Steps: {n_steps}",
+        xlabel="Step",
+        ylabel="Search Width",
+    )
     ax.legend()
-    ax.grid(True)
+    ax.grid()
 
-# Adjust layout and save figure
 plt.tight_layout()
-plot_path = "search_width_comparison.png"
-plt.savefig(plot_path)
+plt.savefig("search_width_comparison.png")
 plt.show()
-
-print(f"Plot saved at: {plot_path}")
+print("Plot saved at: search_width_comparison.png")

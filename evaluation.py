@@ -87,16 +87,14 @@ def main():
     args = parser.parse_args()
 
     exp_folder = args.experiment
-    ks = args.k  # list of k values
+    ks = args.k
     exp_dir = os.path.join("experiments", exp_folder)
 
-    # Load common metadata
     params = load_parameters(exp_dir)
     num_prompts = int(params["num_prompts"])
     model_param = params.get("model", "llava").lower()
     pgd_attack = params.get("pgd_attack", "True").lower() == "true"
 
-    # determine model id
     if model_param == "llava":
         MODEL_ID = "llava-hf/llava-1.5-7b-hf"
     elif model_param == "gemma":
@@ -104,17 +102,14 @@ def main():
     else:
         raise ValueError(f"Unknown model in parameters.csv: {model_param}")
 
-    # Load generation model
     model, processor = load_model_and_processor(MODEL_ID)
 
-    # Load adversarial suffixes and best iterations
     best_iters = compute_best_iterations(exp_dir, num_prompts)
     best_suffixes = load_best_suffixes(exp_dir)
     behaviors = load_harmful_behaviors(
         os.path.join("data", "advbench", "harmful_behaviors.csv")
     )
 
-    # Load moderation model
     mg_id = "meta-llama/Llama-Guard-3-8B"
     mg_tok = AutoTokenizer.from_pretrained(mg_id)
     mg_mod = AutoModelForCausalLM.from_pretrained(
@@ -134,7 +129,6 @@ def main():
     )
     logging.info(f"Starting evaluation of {exp_folder} with ks={ks}")
 
-    # For each k, create its own evaluation directory and run
     for k in ks:
         eval_dir = os.path.join(exp_dir, f"evaluation_k{k}")
         os.makedirs(eval_dir, exist_ok=True)
@@ -145,12 +139,11 @@ def main():
 
         for i in range(1, num_prompts + 1):
             logging.info(f"[k={k}] Prompt {i}/{num_prompts}")
-            goal, target = behaviors[i - 1]
+            goal, _ = behaviors[i - 1]
             suffix = best_suffixes.get(i, "")
             raw_prompt = f"{goal} {suffix}"
             iter_ = best_iters[i]
 
-            # build inputs
             if pgd_attack:
                 prompt_text = raw_prompt.replace("<start_of_image>", "[START_OF_IMAGE]")
                 img_path = os.path.join(exp_dir, f"images_{i}", f"{iter_}.png")
@@ -225,7 +218,6 @@ def main():
                 }
             )
 
-            # write per-run file
             with open(
                 os.path.join(eval_dir, f"run_{i}.txt"), "w", encoding="utf-8"
             ) as f:
@@ -234,20 +226,17 @@ def main():
                 for j, (txt, v, u) in enumerate(details, start=1):
                     f.write(f"--- Gen {j} ---\n{txt}\nVerdict: {v}\nUnsafe: {u}\n\n")
 
-        # save summary.csv
         df = pd.DataFrame(summary)
         summary_csv = os.path.join(eval_dir, "summary.csv")
         df.to_csv(summary_csv, index=False)
         logging.info(f"[k={k}] Summary saved to {summary_csv}")
 
-        # write overall
         overall_file = os.path.join(eval_dir, "overall.txt")
         with open(overall_file, "w", encoding="utf-8") as f:
             f.write(f"Successful runs: {overall_successes}/{num_prompts}\n")
             f.write(f"Success@{k}: {overall_successes}/{num_prompts}\n")
         logging.info(f"[k={k}] Overall success@{k}: {overall_successes}/{num_prompts}")
 
-    # (optional) regenerate aggregated loss plot once
     losses_csv = os.path.join(exp_dir, "losses.csv")
     if os.path.exists(losses_csv):
         try:

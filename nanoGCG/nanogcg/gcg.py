@@ -1,5 +1,4 @@
 import copy
-import gc
 import logging
 import time
 
@@ -774,19 +773,6 @@ class GCG:
                     )
                     logger.info(f"Output generated at iteration {i}: {gen_output}")
 
-                    # # ---------------------------
-                    # # LlamaGuard check in debug output
-                    # # ---------------------------
-                    # guard_chat = parse_conversation(self.initial_prompt, gen_output)
-                    # llama_guard_eval = llama_guard_moderate(guard_chat)
-                    # logger.info(
-                    #     f"LlamaGuard evaluation at iteration {i}: {llama_guard_eval}"
-                    # )
-                    # if "unsafe" in llama_guard_eval.lower():
-                    #     logger.warning(
-                    #         f"LlamaGuard detected unsafe output at iteration {i}."
-                    #     )
-                    #     llama_guard_found_unsafe = True
             else:
                 gen_output = ""
             model_outputs.append(gen_output)
@@ -818,60 +804,6 @@ class GCG:
             f"Average candidate loss computation time: {total_loss_time / num_iters:.4f}s"
         )
 
-        # # ---------------------------
-        # # Final additional inference using best candidate (and image if available)
-        # # ---------------------------
-        # with torch.no_grad():
-        #     if config.pgd_attack and best_image is not None:
-        #         pixel_values = self.normalize(best_image)
-        #         if self.processor.__class__.__name__ == "Gemma3Processor":
-        #             image_features = model.get_image_features(pixel_values=pixel_values)
-        #         else:
-        #             image_features = model.get_image_features(
-        #                 pixel_values=pixel_values,
-        #                 vision_feature_layer=-2,
-        #                 vision_feature_select_strategy="default",
-        #             )
-
-        #         input_embeds = self._build_input_embeds_gcg_pgd(
-        #             best_optim_ids,
-        #             image_features,
-        #             search_width=1,
-        #             no_target=True,
-        #         )
-        #     else:
-        #         input_embeds = self._build_input_embeds_gcg(
-        #             best_optim_ids,
-        #             search_width=1,
-        #             no_target=True,
-        #         )
-        #     final_generated_ids = model.generate(
-        #         inputs_embeds=input_embeds, max_new_tokens=120
-        #     )
-        #     best_gen_output = tokenizer.decode(
-        #         final_generated_ids[0], skip_special_tokens=True
-        #     )
-        #     logger.info(
-        #         f"Final output generated using best candidate: {best_gen_output}"
-        #     )
-
-        #     # ---------------------------
-        #     # Final LlamaGuard evaluation using best candidate output
-        #     # ---------------------------
-        #     guard_chat = parse_conversation(self.initial_prompt, best_gen_output)
-        #     llama_guard_final_eval = llama_guard_moderate(guard_chat)
-        #     logger.info(
-        #         f"Final LlamaGuard evaluation using best candidate: {llama_guard_final_eval}"
-        #     )
-        #     final_llama_guard_flag = "unsafe" in llama_guard_final_eval.lower()
-        #     overall_llama_guard_unsafe = (
-        #         llama_guard_found_unsafe or final_llama_guard_flag
-        #     )
-
-        # Optionally, you might want to append the final generated output to model_outputs:
-        # model_outputs.append(best_gen_output)
-
-        # Use the best candidate (based on lowest loss) for the final result.
         min_loss_index = losses.index(min(losses))
         result = GCGResult(
             best_loss=losses[min_loss_index],
@@ -1351,39 +1283,6 @@ class GCG:
     def _compute_candidates_loss_original(
         self, search_batch_size: int, input_embeds: Tensor
     ) -> Tensor:
-        # all_loss = []
-        # for i in range(0, input_embeds.shape[0], search_batch_size):
-        #     with torch.no_grad():
-        #         input_embeds_batch = input_embeds[i : i + search_batch_size]
-        #         current_batch_size = input_embeds_batch.shape[0]
-
-        #         outputs = self.model(inputs_embeds=input_embeds_batch)
-        #         logits = outputs.logits
-        #         tmp = input_embeds.shape[1] - self.target_ids.shape[1]
-        #         shift_logits = logits[..., tmp - 1 : -1, :].contiguous()
-        #         shift_labels = self.target_ids.repeat(current_batch_size, 1)
-
-        #         loss = torch.nn.functional.cross_entropy(
-        #             shift_logits.view(-1, shift_logits.size(-1)),
-        #             shift_labels.view(-1),
-        #             reduction="none",
-        #         )
-        #         loss = loss.view(current_batch_size, -1).mean(dim=-1)
-        #         all_loss.append(loss)
-        #         if self.config.early_stop:
-        #             if torch.any(
-        #                 torch.all(
-        #                     torch.argmax(shift_logits, dim=-1) == shift_labels, dim=-1
-        #                 )
-        #             ).item():
-        #                 self.stop_flag = True
-        #         del outputs
-        #         gc.collect()
-        #         torch.cuda.empty_cache()
-        # return torch.cat(all_loss, dim=0)
-        """
-        Computes per‑candidate CE loss (mean over tokens) in one forward.
-        """
         with torch.no_grad():
             # 1) forward once
             outputs = self.model(inputs_embeds=input_embeds)
