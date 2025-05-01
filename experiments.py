@@ -13,7 +13,7 @@ import torch
 import torchvision.transforms as T
 from PIL import Image
 
-from bimodalattack import GCGConfig
+from bimodalattack import BimodalAttackConfig
 import bimodalattack
 from utils.experiments_utils import (
     load_advbench_dataset,
@@ -65,7 +65,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
 
     for idx, (goal, target_text) in enumerate(advbench_pairs, start=1):
         images_folder = get_images_folder(experiment_folder, idx)
-        config = GCGConfig(
+        config = BimodalAttackConfig(
             **{
                 k: v
                 for k, v in config_kwargs.items()
@@ -95,10 +95,10 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             run_time = time.time() - start_time
             run_loss = result.best_loss
             run_losses = result.losses
-        except Exception:
-            from bimodalattack import GCGResult
+        except Exception as e:
+            from bimodalattack import BimodalAttackResult
 
-            result = GCGResult(
+            result = BimodalAttackResult(
                 best_loss=float("nan"),
                 best_string="",
                 losses=[],
@@ -112,6 +112,11 @@ def run_experiment(name, config_kwargs, advbench_pairs):
                 total_times=[],
             )
             run_time, run_loss, run_losses = 0, float("nan"), []
+            
+            logging.error(
+                f"Error during attack for prompt {idx}/{len(advbench_pairs)}: {goal} -> {target_text}"
+            )
+            logging.error(f"Exception: {e}")
 
         logging.info(
             f"Run {idx} (Seed={EXPERIMENT_SEED}) -> Loss={run_loss:.4f}, Time={run_time:.2f}s"
