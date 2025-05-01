@@ -432,21 +432,21 @@ set -e
 #     > logs/experiments_gemma_pgd_gcg_jointeval_lowswds.out 2>&1
 
 #TODO:
-CUDA_VISIBLE_DEVICES=6 python experiments.py \
-    --name "Gemma - Joint Eval (High eps, DS)" \
-    --num_steps 500 \
-    --search_width 256 \
-    --dynamic_search True \
-    --min_search_width 32 \
-    --pgd_attack True \
-    --gcg_attack True \
-    --pgd_after_gcg False \
-    --alpha "4/255" \
-    --eps "64/255" \
-    --debug_output False \
-    --joint_eval True \
-    --model "gemma" \
-    > logs/experiments_gemma_pgd_gcg_jointeval_ds.out 2>&1
+# CUDA_VISIBLE_DEVICES=6 python experiments.py \
+#     --name "Gemma - Joint Eval (High eps, DS)" \
+#     --num_steps 500 \
+#     --search_width 256 \
+#     --dynamic_search True \
+#     --min_search_width 32 \
+#     --pgd_attack True \
+#     --gcg_attack True \
+#     --pgd_after_gcg False \
+#     --alpha "4/255" \
+#     --eps "64/255" \
+#     --debug_output False \
+#     --joint_eval True \
+#     --model "gemma" \
+#     > logs/experiments_gemma_pgd_gcg_jointeval_ds.out 2>&1
 
 # CUDA_VISIBLE_DEVICES=7 python experiments.py \
 #     --name "Gemma - Joint Eval (High eps, DS)" \

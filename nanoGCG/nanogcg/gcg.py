@@ -41,9 +41,9 @@ logger.propagate = False
 @dataclass
 class GCGConfig:
     num_steps: int = 250
-    optim_str_init: Union[str, List[str]] = "x x x x x x x x x x x x x x x x x x x x"
+    optim_str_init: Union[str, List[str]] = "x x x x x x x x x x x x x x x x x x x"
     search_width: int = 512
-    batch_size: int = None
+    batch_size: Optional[int] = None
     topk: int = 256
     n_replace: int = 1
     buffer_size: int = 0
@@ -53,7 +53,7 @@ class GCGConfig:
     allow_non_ascii: bool = False
     filter_ids: bool = True
     add_space_before_target: bool = False
-    seed: int = None
+    seed: Optional[int] = None
     verbosity: str = "INFO"
     dynamic_search: bool = False
     min_search_width: int = 32
@@ -82,7 +82,6 @@ class GCGResult:
     loss_times: List[float]
     pgd_times: List[float]
     total_times: List[float] = None
-    # llama_guard_unsafe: bool = False
 
 
 # ---------------------------
@@ -171,7 +170,6 @@ def filter_ids(ids: Tensor, tokenizer: transformers.PreTrainedTokenizer):
     filtered_ids = []
 
     for i in range(len(ids_decoded)):
-        # Retokenize the decoded token ids
         ids_encoded = tokenizer(
             ids_decoded[i], return_tensors="pt", add_special_tokens=False
         ).to(ids.device)["input_ids"][0]
@@ -1107,6 +1105,122 @@ class GCG:
 
         return new_image
 
+    def _build_input_embeds(
+        self,
+        sampled_ids: Tensor,
+        image: Optional[Tensor] = None,
+        search_width: Optional[int] = None,
+        mode: str = "gcg",
+        single: bool = False,
+        no_joint_eval: bool = False,
+        no_target: bool = False,
+    ) -> Tensor:
+        """
+        Unified embed builder:
+        - automatically repeats any 1-element batch dims to `search_width`
+        - handles 'gcg', 'pgd', and 'gcg_pgd' modes with identical semantics
+        """
+        mt = self.model.config.model_type
+        emb = self.embedding_layer
+        sw = search_width
+
+        # segment→tensor map
+        def get(seg: str) -> Tensor:
+            if seg == "before":
+                return self.before_embeds
+            if seg == "before_img":
+                return self.before_img_embeds
+            if seg == "before_suffix":
+                return self.before_suffix_embeds
+            if seg == "image":
+                return image
+            if seg == "optim":
+                return emb(sampled_ids)
+            if seg == "after":
+                return self.after_embeds
+            if seg == "target":
+                return self.target_embeds
+            raise ValueError(f"Unknown segment '{seg}'")
+
+        # pick sequence of segments
+        if mode == "pgd":
+            assert single, "PGD mode only supports single=True"
+            seq = (
+                ["before_img", "optim", "before_suffix", "image", "after", "target"]
+                if mt == "gemma3"
+                else [
+                    "before_img",
+                    "image",
+                    "before_suffix",
+                    "optim",
+                    "after",
+                    "target",
+                ]
+            )
+
+        elif mode == "gcg":
+            if single:
+                seq = (
+                    ["before_img", "optim", "before_suffix", "after", "target"]
+                    if mt == "gemma3"
+                    else ["before_img", "before_suffix", "optim", "after", "target"]
+                )
+            elif no_joint_eval:
+                seq = ["before", "optim", "after", "target"]
+            elif no_target:
+                seq = ["before", "optim", "after"]
+            else:
+                raise ValueError("Invalid flags for gcg mode")
+
+        elif mode == "gcg_pgd":
+            if single:
+                seq = (
+                    ["before_img", "optim", "before_suffix", "image", "after", "target"]
+                    if mt == "gemma3"
+                    else [
+                        "before_img",
+                        "image",
+                        "before_suffix",
+                        "optim",
+                        "after",
+                        "target",
+                    ]
+                )
+            elif no_target:
+                seq = (
+                    ["before_img", "optim", "before_suffix", "image", "after"]
+                    if mt == "gemma3"
+                    else ["before_img", "image", "before_suffix", "optim", "after"]
+                )
+            else:
+                # full non-single
+                seq = (
+                    ["before_img", "optim", "before_suffix", "image", "after", "target"]
+                    if mt == "gemma3"
+                    else [
+                        "before_img",
+                        "image",
+                        "before_suffix",
+                        "optim",
+                        "after",
+                        "target",
+                    ]
+                )
+
+        else:
+            raise ValueError(f"Unknown mode '{mode}'")
+
+        # gather & repeat
+        parts: List[Tensor] = []
+        for seg in seq:
+            t = get(seg)  # shape (1, L, D) or (sw, L, D) for 'optim'
+            if sw is not None and t.shape[0] == 1:
+                # replicate any 1-batch element to match search_width
+                t = t.repeat(sw, 1, 1)
+            parts.append(t)
+        return torch.cat(parts, dim=1)
+
+    # backward compatibility wrappers
     def _build_input_embeds_pgd(
         self,
         sampled_ids: Tensor,
@@ -1114,31 +1228,13 @@ class GCG:
         search_width: int,
         single: bool = False,
     ) -> Tensor:
-        if single:
-            if self.model.config.model_type == "gemma3":
-                return torch.cat(
-                    [
-                        self.before_img_embeds.repeat(search_width, 1, 1),
-                        self.embedding_layer(sampled_ids),
-                        self.before_suffix_embeds.repeat(search_width, 1, 1),
-                        image.repeat(search_width, 1, 1),
-                        self.after_embeds.repeat(search_width, 1, 1),
-                        self.target_embeds.repeat(search_width, 1, 1),
-                    ],
-                    dim=1,
-                )
-            else:
-                return torch.cat(
-                    [
-                        self.before_img_embeds.repeat(search_width, 1, 1),
-                        image.repeat(search_width, 1, 1),
-                        self.before_suffix_embeds.repeat(search_width, 1, 1),
-                        self.embedding_layer(sampled_ids),
-                        self.after_embeds.repeat(search_width, 1, 1),
-                        self.target_embeds.repeat(search_width, 1, 1),
-                    ],
-                    dim=1,
-                )
+        return self._build_input_embeds(
+            sampled_ids,
+            image=image,
+            search_width=search_width,
+            mode="pgd",
+            single=single,
+        )
 
     def _build_input_embeds_gcg(
         self,
@@ -1148,180 +1244,58 @@ class GCG:
         no_joint_eval: bool = False,
         no_target: bool = False,
     ) -> Tensor:
-
-        if single:
-            if self.model.config.model_type == "gemma3":
-                return torch.cat(
-                    [
-                        self.before_img_embeds.repeat(search_width, 1, 1),
-                        self.embedding_layer(sampled_ids),
-                        self.before_suffix_embeds.repeat(search_width, 1, 1),
-                        self.after_embeds.repeat(search_width, 1, 1),
-                        self.target_embeds.repeat(search_width, 1, 1),
-                    ],
-                    dim=1,
-                )
-            else:
-                return torch.cat(
-                    [
-                        self.before_img_embeds.repeat(search_width, 1, 1),
-                        self.before_suffix_embeds.repeat(search_width, 1, 1),
-                        self.embedding_layer(sampled_ids),
-                        self.after_embeds.repeat(search_width, 1, 1),
-                        self.target_embeds.repeat(search_width, 1, 1),
-                    ],
-                    dim=1,
-                )
-
-        # TODO: Check if here would be the same for Gemma and Llava
-        if no_joint_eval:
-            return torch.cat(
-                [
-                    self.before_embeds.repeat(search_width, 1, 1),
-                    self.embedding_layer(sampled_ids),
-                    self.after_embeds.repeat(search_width, 1, 1),
-                    self.target_embeds.repeat(search_width, 1, 1),
-                ],
-                dim=1,
-            )
-        # TODO: Check if here would be the same for Gemma and Llava
-        if no_target:
-            return torch.cat(
-                [
-                    self.before_embeds.repeat(search_width, 1, 1),
-                    self.embedding_layer(sampled_ids),
-                    self.after_embeds.repeat(search_width, 1, 1),
-                ],
-                dim=1,
-            )
+        return self._build_input_embeds(
+            sampled_ids,
+            image=None,
+            search_width=search_width,
+            mode="gcg",
+            single=single,
+            no_joint_eval=no_joint_eval,
+            no_target=no_target,
+        )
 
     def _build_input_embeds_gcg_pgd(
         self,
         sampled_ids: Tensor,
         image: Tensor,
-        search_width=None,
+        search_width: Optional[int] = None,
         single: bool = False,
         no_target: bool = False,
     ) -> Tensor:
-
-        if single:
-            if self.model.config.model_type == "gemma3":
-                return torch.cat(
-                    [
-                        self.before_img_embeds.repeat(search_width, 1, 1),
-                        self.embedding_layer(sampled_ids),
-                        self.before_suffix_embeds.repeat(search_width, 1, 1),
-                        image.repeat(search_width, 1, 1),
-                        self.after_embeds.repeat(search_width, 1, 1),
-                        self.target_embeds.repeat(search_width, 1, 1),
-                    ],
-                    dim=1,
-                )
-            else:
-                return torch.cat(
-                    [
-                        self.before_img_embeds.repeat(search_width, 1, 1),
-                        image.repeat(search_width, 1, 1),
-                        self.before_suffix_embeds.repeat(search_width, 1, 1),
-                        self.embedding_layer(sampled_ids),
-                        self.after_embeds.repeat(search_width, 1, 1),
-                        self.target_embeds.repeat(search_width, 1, 1),
-                    ],
-                    dim=1,
-                )
-
-        elif no_target:
-            if self.model.config.model_type == "gemma3":
-                return torch.cat(
-                    [
-                        self.before_img_embeds.repeat(search_width, 1, 1),
-                        self.embedding_layer(sampled_ids),
-                        self.before_suffix_embeds.repeat(search_width, 1, 1),
-                        image.repeat(search_width, 1, 1),
-                        self.after_embeds.repeat(search_width, 1, 1),
-                    ],
-                    dim=1,
-                )
-            else:
-                return torch.cat(
-                    [
-                        self.before_img_embeds.repeat(search_width, 1, 1),
-                        image.repeat(search_width, 1, 1),
-                        self.before_suffix_embeds.repeat(search_width, 1, 1),
-                        self.embedding_layer(sampled_ids),
-                        self.after_embeds.repeat(search_width, 1, 1),
-                    ],
-                    dim=1,
-                )
-
-        else:
-            if self.model.config.model_type == "gemma3":
-                return torch.cat(
-                    [
-                        self.before_img_embeds,
-                        self.embedding_layer(sampled_ids),
-                        self.before_suffix_embeds,
-                        image,
-                        self.after_embeds,
-                        self.target_embeds,
-                    ],
-                    dim=1,
-                )
-            else:
-                return torch.cat(
-                    [
-                        self.before_img_embeds,
-                        image,
-                        self.before_suffix_embeds,
-                        self.embedding_layer(sampled_ids),
-                        self.after_embeds,
-                        self.target_embeds,
-                    ],
-                    dim=1,
-                )
+        return self._build_input_embeds(
+            sampled_ids,
+            image=image,
+            search_width=search_width,
+            mode="gcg_pgd",
+            single=single,
+            no_target=no_target,
+        )
 
     def _compute_candidates_loss_original(
         self, search_batch_size: int, input_embeds: Tensor
     ) -> Tensor:
         with torch.no_grad():
-            # 1) forward once
             outputs = self.model(inputs_embeds=input_embeds)
-            logits  = outputs.logits                               # (B, L, V)
-
-            # 2) slice out the positions that align with target_ids
+            logits = outputs.logits
             seq_len = input_embeds.size(1)
             tgt_len = self.target_ids.numel()
-            offset  = seq_len - tgt_len
-            # shift_logits: (B, tgt_len, V)
+            offset = seq_len - tgt_len
             shift_logits = logits[..., offset - 1 : -1, :].contiguous()
-
-            # 3) build a (B, tgt_len) label tensor
             tgt = self.target_ids.squeeze()
             if tgt.dim() != 1:
                 tgt = tgt.view(-1)
             batch_size = shift_logits.size(0)
-            shift_labels = tgt.unsqueeze(0).expand(batch_size, -1)
-            # ensure contiguous in memory
-            shift_labels = shift_labels.contiguous()
-
-            # 4) flatten logits & labels safely
+            shift_labels = tgt.unsqueeze(0).expand(batch_size, -1).contiguous()
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-            flat_labels = shift_labels.reshape(-1)
-
-            # 5) compute per‑token CE, then mean over each sequence
+            flat_labels = shift_labels.view(-1)
             loss_flat = torch.nn.functional.cross_entropy(
-                flat_logits,
-                flat_labels,
-                reduction="none"
+                flat_logits, flat_labels, reduction="none"
             )
             losses = loss_flat.view(batch_size, -1).mean(dim=1)
-
-            # 6) early‑stop check
             if self.config.early_stop:
                 correct = torch.argmax(shift_logits, dim=-1) == shift_labels
                 if torch.any(correct.all(dim=-1)):
                     self.stop_flag = True
-
         return losses
 
     def _save_image(self, image, path):
@@ -1350,5 +1324,4 @@ def run(
         config = GCGConfig()
     logger.setLevel(getattr(logging, config.verbosity))
     gcg = GCG(model, tokenizer, processor, config, normalize)
-    result = gcg.run(messages, goal, target, image)
-    return result
+    return gcg.run(messages, goal, target, image)
