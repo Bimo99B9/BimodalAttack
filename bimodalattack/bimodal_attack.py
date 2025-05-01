@@ -12,7 +12,7 @@ import transformers
 from torch import Tensor
 from transformers import set_seed
 
-from nanogcg.utils import INIT_CHARS, find_executable_batch_size, get_nonascii_toks
+from bimodalattack.utils import INIT_CHARS, find_executable_batch_size, get_nonascii_toks
 
 from PIL import Image
 import torchvision.transforms.functional as F
@@ -22,7 +22,7 @@ import os
 # ---------------------------
 # Logging configuration
 # ---------------------------
-logger = logging.getLogger("nanogcg")
+logger = logging.getLogger("nanoBimodalAttack")
 if not logger.hasHandlers():
     handler = logging.StreamHandler()
     formatter = logging.Formatter(
@@ -39,7 +39,7 @@ logger.propagate = False
 # Dataclass definitions
 # ---------------------------
 @dataclass
-class GCGConfig:
+class BimodalAttackConfig:
     num_steps: int = 250
     optim_str_init: Union[str, List[str]] = "x x x x x x x x x x x x x x x x x x x"
     search_width: int = 512
@@ -60,17 +60,17 @@ class GCGConfig:
     alpha: float = 0.01
     eps: float = 0.1
     pgd_attack: bool = False
-    gcg_attack: bool = True
+    BimodalAttack_attack: bool = True
     debug_output: bool = False
     joint_eval: bool = False
     experiment_folder: str = "experiments/missing_folder"
     images_folder: str = "experiments/missing_folder/images"
-    pgd_after_gcg: bool = False
+    pgd_after_BimodalAttack: bool = False
     model: str = "llava"
 
 
 @dataclass
-class GCGResult:
+class BimodalAttackResult:
     best_loss: float
     best_string: str
     losses: List[float]
@@ -186,15 +186,15 @@ def filter_ids(ids: Tensor, tokenizer: transformers.PreTrainedTokenizer):
 
 
 # ---------------------------
-# Main GCG class definition
+# Main BimodalAttack class definition
 # ---------------------------
-class GCG:
+class BimodalAttack:
     def __init__(
         self,
         model: transformers.PreTrainedModel,
         tokenizer: transformers.PreTrainedTokenizer,
         processor,
-        config: GCGConfig,
+        config: BimodalAttackConfig,
         normalize=None,
     ):
         self.model = model
@@ -232,14 +232,14 @@ class GCG:
         if not hasattr(tokenizer, "chat_template") or not tokenizer.chat_template:
             if config.pgd_attack:
                 logger.warning(
-                    "Tokenizer does not have a chat template. Using custom chat template for GCG+PGD attack."
+                    "Tokenizer does not have a chat template. Using custom chat template for BimodalAttack+PGD attack."
                 )
                 custom_template = "USER: <image>\n{{ messages[0]['content'][0]['text'] }} \nASSISTANT: "
                 tokenizer.chat_template = custom_template
                 self.processor.chat_template = custom_template
             else:
                 logger.warning(
-                    "Tokenizer does not have a chat template. Using custom chat template for GCG only attack."
+                    "Tokenizer does not have a chat template. Using custom chat template for BimodalAttack only attack."
                 )
                 custom_template = (
                     "{% for message in messages %}{{ message['content'] }}{% endfor %}"
@@ -253,7 +253,7 @@ class GCG:
         goal: str,
         target: str,
         image: torch.Tensor = None,
-    ) -> GCGResult:
+    ) -> BimodalAttackResult:
         model = self.model
         tokenizer = self.tokenizer
         config = self.config
@@ -425,21 +425,21 @@ class GCG:
             image_original = image.clone()
 
         # Log the overall configuration.
-        if config.pgd_attack and config.gcg_attack:
-            if config.pgd_after_gcg:
+        if config.pgd_attack and config.BimodalAttack_attack:
+            if config.pgd_after_BimodalAttack:
                 logger.info(
-                    "Running GCG and PGD with PGD after GCG (GRADS -> GCG -> GRADS -> PGD)"
+                    "Running BimodalAttack and PGD with PGD after BimodalAttack (GRADS -> BimodalAttack -> GRADS -> PGD)"
                 )
             else:
-                logger.info("Running PGD and GCG (GRADS -> PGD -> GRADS -> GCG)")
-        elif config.pgd_attack and not config.gcg_attack:
+                logger.info("Running PGD and BimodalAttack (GRADS -> PGD -> GRADS -> BimodalAttack)")
+        elif config.pgd_attack and not config.BimodalAttack_attack:
             logger.info("Running only PGD (GRADS -> PGD)")
-        elif config.gcg_attack and not config.pgd_attack:
-            logger.info("Running only GCG (GRADS -> GCG)")
+        elif config.BimodalAttack_attack and not config.pgd_attack:
+            logger.info("Running only BimodalAttack (GRADS -> BimodalAttack)")
 
         for i in tqdm(range(config.num_steps)):
             logger.info(
-                f"[Iteration {i}] Starting iteration with config: pgd_attack={config.pgd_attack}, gcg_attack={config.gcg_attack}, pgd_after_gcg={config.pgd_after_gcg}"
+                f"[Iteration {i}] Starting iteration with config: pgd_attack={config.pgd_attack}, BimodalAttack_attack={config.BimodalAttack_attack}, pgd_after_BimodalAttack={config.pgd_after_BimodalAttack}"
             )
 
             ### Phase A - Initial gradient computation (GRADS)
@@ -458,8 +458,8 @@ class GCG:
             )
 
             # Depending on ordering, either perform PGD update now (phases B & C) or skip them.
-            if config.pgd_attack and not config.pgd_after_gcg:
-                logger.info(f"[Iteration {i}] Running PGD before GCG (Phase B)")
+            if config.pgd_attack and not config.pgd_after_BimodalAttack:
+                logger.info(f"[Iteration {i}] Running PGD before BimodalAttack (Phase B)")
                 start_pgd = time.perf_counter()
 
                 image = self.perform_pgd_step(
@@ -477,7 +477,7 @@ class GCG:
                 )
 
                 ### Phase C - Recompute gradient after PGD update. Do not recompute gradients if using joint eval.
-                if config.gcg_attack and not config.joint_eval:
+                if config.BimodalAttack_attack and not config.joint_eval:
                     start_grad = time.perf_counter()
                     optim_ids_onehot_grad, image_grad = self.compute_gradient(
                         optim_ids, image
@@ -488,9 +488,9 @@ class GCG:
                     logger.info(
                         f"[Iteration {i}] Phase C (Recompute GRADS) completed in {grad_time:.4f}s"
                     )
-            elif config.pgd_after_gcg:
+            elif config.pgd_after_BimodalAttack:
                 logger.info(
-                    f"[Iteration {i}] Skipping PGD update (B) and second GRADS (C) due to pgd_after_gcg flag; will perform PGD after GCG"
+                    f"[Iteration {i}] Skipping PGD update (B) and second GRADS (C) due to pgd_after_BimodalAttack flag; will perform PGD after BimodalAttack"
                 )
             else:
                 pgd_time = 0.0
@@ -498,8 +498,8 @@ class GCG:
                     f"[Iteration {i}] Skipping PGD update (B) and second GRADS (C) due to no PGD attack"
                 )
 
-            ### Phase D - GCG candidate sampling and (partial) loss computation.
-            logger.info(f"[Iteration {i}] Running GCG candidate sampling (Phase D)")
+            ### Phase D - BimodalAttack candidate sampling and (partial) loss computation.
+            logger.info(f"[Iteration {i}] Running BimodalAttack candidate sampling (Phase D)")
             sampled_ids, new_search_width, sampling_time, total_sampling_time = (
                 self.candidate_sampling(
                     config,
@@ -534,9 +534,9 @@ class GCG:
                             vision_feature_select_strategy="default",
                         )
 
-                    if config.pgd_after_gcg:
+                    if config.pgd_after_BimodalAttack:
                         if config.joint_eval:
-                            candidate_input_embeds = self._build_input_embeds_gcg_pgd(
+                            candidate_input_embeds = self._build_input_embeds_BimodalAttack_pgd(
                                 sampled_ids,
                                 image_features,
                                 search_width=new_search_width,
@@ -549,8 +549,8 @@ class GCG:
                             best_loss_before_image = loss.min().item()
                             best_idx = loss.argmin()
                         else:
-                            if config.gcg_attack:
-                                candidate_input_embeds = self._build_input_embeds_gcg(
+                            if config.BimodalAttack_attack:
+                                candidate_input_embeds = self._build_input_embeds_BimodalAttack(
                                     sampled_ids,
                                     search_width=new_search_width,
                                     single=True,
@@ -565,7 +565,7 @@ class GCG:
                                 best_loss_before_image = 0.0
                                 best_idx = 0
                         logger.info(
-                            f"[Iteration {i}] [GCG] Selected candidate index {best_idx} (pre-PGD update), loss before image evaluation: {best_loss_before_image:.4f}"
+                            f"[Iteration {i}] [BimodalAttack] Selected candidate index {best_idx} (pre-PGD update), loss before image evaluation: {best_loss_before_image:.4f}"
                         )
                         chosen_candidate = sampled_ids[best_idx].unsqueeze(0)
                     else:
@@ -583,8 +583,8 @@ class GCG:
                             best_loss_before_image = loss.min().item()
                             best_idx = loss.argmin()
                         else:
-                            if config.gcg_attack:
-                                candidate_input_embeds = self._build_input_embeds_gcg(
+                            if config.BimodalAttack_attack:
+                                candidate_input_embeds = self._build_input_embeds_BimodalAttack(
                                     sampled_ids,
                                     search_width=new_search_width,
                                     single=True,
@@ -601,7 +601,7 @@ class GCG:
                         logger.info(
                             f"[Iteration {i}] Best loss before evaluation with image: {best_loss_before_image:.4f}"
                         )
-                        full_input_embeds = self._build_input_embeds_gcg_pgd(
+                        full_input_embeds = self._build_input_embeds_BimodalAttack_pgd(
                             sampled_ids[best_idx].unsqueeze(0), image_features
                         )
 
@@ -625,8 +625,8 @@ class GCG:
                         logger.info(
                             f"[Iteration {i}] Final loss with image and suffix: {current_loss:.4f}"
                         )
-                else:  # GCG without PGD.
-                    candidate_input_embeds = self._build_input_embeds_gcg(
+                else:  # BimodalAttack without PGD.
+                    candidate_input_embeds = self._build_input_embeds_BimodalAttack(
                         sampled_ids, search_width=new_search_width, no_joint_eval=True
                     )
                     loss = find_executable_batch_size(
@@ -659,10 +659,10 @@ class GCG:
 
             # End Phase D
 
-            # If PGD is to run after GCG, do it here.
-            if config.pgd_after_gcg and config.pgd_attack:
+            # If PGD is to run after BimodalAttack, do it here.
+            if config.pgd_after_BimodalAttack and config.pgd_attack:
                 logger.info(
-                    f"[Iteration {i}] Running PGD after GCG: computing gradient (Phase E)"
+                    f"[Iteration {i}] Running PGD after BimodalAttack: computing gradient (Phase E)"
                 )
                 start_grad = time.perf_counter()
                 optim_ids_onehot_grad, image_grad = self.compute_gradient(
@@ -672,11 +672,11 @@ class GCG:
                 gradient_times.append(grad_time)
                 total_gradient_time += grad_time
                 logger.info(
-                    f"[Iteration {i}] Phase E (GRADS after GCG) completed in {grad_time:.4f}s"
+                    f"[Iteration {i}] Phase E (GRADS after BimodalAttack) completed in {grad_time:.4f}s"
                 )
 
                 logger.info(
-                    f"[Iteration {i}] Running PGD after GCG: PGD update (Phase F)"
+                    f"[Iteration {i}] Running PGD after BimodalAttack: PGD update (Phase F)"
                 )
                 start_pgd = time.perf_counter()
                 image = self.perform_pgd_step(
@@ -690,7 +690,7 @@ class GCG:
                 pgd_times.append(pgd_time)
                 total_pgd_time += pgd_time
                 logger.info(
-                    f"[Iteration {i}] Phase F (PGD update after GCG) completed in {pgd_time:.4f}s"
+                    f"[Iteration {i}] Phase F (PGD update after BimodalAttack) completed in {pgd_time:.4f}s"
                 )
 
                 with torch.no_grad():
@@ -707,7 +707,7 @@ class GCG:
                             vision_feature_select_strategy="default",
                         )
 
-                    full_input_embeds = self._build_input_embeds_gcg_pgd(
+                    full_input_embeds = self._build_input_embeds_BimodalAttack_pgd(
                         chosen_candidate, image_features
                     )
 
@@ -717,7 +717,7 @@ class GCG:
                     current_loss = full_loss.item()
                     optim_ids = chosen_candidate
                     logger.info(
-                        f"[Iteration {i}] Final loss after [PGD after GCG]: {current_loss:.4f}"
+                        f"[Iteration {i}] Final loss after [PGD after BimodalAttack]: {current_loss:.4f}"
                     )
                     loss_time = time.perf_counter() - start_loss
                     loss_times.append(loss_time)
@@ -752,14 +752,14 @@ class GCG:
                                 vision_feature_select_strategy="default",
                             )
 
-                        input_embeds = self._build_input_embeds_gcg_pgd(
+                        input_embeds = self._build_input_embeds_BimodalAttack_pgd(
                             sampled_ids,
                             image_features,
                             search_width=new_search_width,
                             no_target=True,
                         )
                     else:
-                        input_embeds = self._build_input_embeds_gcg(
+                        input_embeds = self._build_input_embeds_BimodalAttack(
                             sampled_ids, search_width=new_search_width, no_target=True
                         )
 
@@ -803,7 +803,7 @@ class GCG:
         )
 
         min_loss_index = losses.index(min(losses))
-        result = GCGResult(
+        result = BimodalAttackResult(
             best_loss=losses[min_loss_index],
             best_string=optim_strings[min_loss_index],
             losses=losses,
@@ -879,14 +879,14 @@ class GCG:
                     vision_feature_select_strategy="default",
                 )
 
-            init_buffer_embeds = self._build_input_embeds_gcg_pgd(
+            init_buffer_embeds = self._build_input_embeds_BimodalAttack_pgd(
                 init_buffer_ids,
                 image_features,
                 search_width=true_buffer_size,
                 single=True,
             )
         else:
-            init_buffer_embeds = self._build_input_embeds_gcg(
+            init_buffer_embeds = self._build_input_embeds_BimodalAttack(
                 init_buffer_ids, search_width=true_buffer_size, no_joint_eval=True
             )
 
@@ -903,7 +903,7 @@ class GCG:
 
     def candidate_sampling(
         self,
-        config: GCGConfig,
+        config: BimodalAttackConfig,
         i,
         optim_ids,
         optim_ids_onehot_grad,
@@ -923,7 +923,7 @@ class GCG:
         else:
             current_search_width = config.search_width
 
-        if config.gcg_attack:
+        if config.BimodalAttack_attack:
             start_sample = time.perf_counter()
             sampled_ids = sample_ids_from_grad(
                 optim_ids.squeeze(0),
@@ -956,7 +956,7 @@ class GCG:
             optim_ids, num_classes=embedding_layer.num_embeddings
         )
         optim_ids_onehot = optim_ids_onehot.to(model.device, model.dtype)
-        if self.config.gcg_attack:
+        if self.config.BimodalAttack_attack:
             optim_ids_onehot.requires_grad_()
         else:
             optim_ids_onehot.requires_grad = False
@@ -1008,7 +1008,7 @@ class GCG:
         )
 
         if self.config.pgd_attack:
-            if self.config.gcg_attack:
+            if self.config.BimodalAttack_attack:
                 optim_ids_onehot_grad, image_grad = torch.autograd.grad(
                     loss, (optim_ids_onehot, image)
                 )
@@ -1017,7 +1017,7 @@ class GCG:
                 optim_ids_onehot_grad = None
             return optim_ids_onehot_grad, image_grad
         else:
-            if self.config.gcg_attack:
+            if self.config.BimodalAttack_attack:
                 optim_ids_onehot_grad = torch.autograd.grad(loss, optim_ids_onehot)[0]
             else:
                 optim_ids_onehot_grad = None
@@ -1110,7 +1110,7 @@ class GCG:
         sampled_ids: Tensor,
         image: Optional[Tensor] = None,
         search_width: Optional[int] = None,
-        mode: str = "gcg",
+        mode: str = "BimodalAttack",
         single: bool = False,
         no_joint_eval: bool = False,
         no_target: bool = False,
@@ -1118,7 +1118,7 @@ class GCG:
         """
         Unified embed builder:
         - automatically repeats any 1-element batch dims to `search_width`
-        - handles 'gcg', 'pgd', and 'gcg_pgd' modes with identical semantics
+        - handles 'BimodalAttack', 'pgd', and 'BimodalAttack_pgd' modes with identical semantics
         """
         mt = self.model.config.model_type
         emb = self.embedding_layer
@@ -1158,7 +1158,7 @@ class GCG:
                 ]
             )
 
-        elif mode == "gcg":
+        elif mode == "BimodalAttack":
             if single:
                 seq = (
                     ["before_img", "optim", "before_suffix", "after", "target"]
@@ -1170,9 +1170,9 @@ class GCG:
             elif no_target:
                 seq = ["before", "optim", "after"]
             else:
-                raise ValueError("Invalid flags for gcg mode")
+                raise ValueError("Invalid flags for BimodalAttack mode")
 
-        elif mode == "gcg_pgd":
+        elif mode == "BimodalAttack_pgd":
             if single:
                 seq = (
                     ["before_img", "optim", "before_suffix", "image", "after", "target"]
@@ -1236,7 +1236,7 @@ class GCG:
             single=single,
         )
 
-    def _build_input_embeds_gcg(
+    def _build_input_embeds_BimodalAttack(
         self,
         sampled_ids: Tensor,
         search_width: int,
@@ -1248,13 +1248,13 @@ class GCG:
             sampled_ids,
             image=None,
             search_width=search_width,
-            mode="gcg",
+            mode="BimodalAttack",
             single=single,
             no_joint_eval=no_joint_eval,
             no_target=no_target,
         )
 
-    def _build_input_embeds_gcg_pgd(
+    def _build_input_embeds_BimodalAttack_pgd(
         self,
         sampled_ids: Tensor,
         image: Tensor,
@@ -1266,7 +1266,7 @@ class GCG:
             sampled_ids,
             image=image,
             search_width=search_width,
-            mode="gcg_pgd",
+            mode="BimodalAttack_pgd",
             single=single,
             no_target=no_target,
         )
@@ -1317,11 +1317,11 @@ def run(
     goal: str,
     target: str,
     image: Tensor = None,
-    config: Optional[GCGConfig] = None,
+    config: Optional[BimodalAttackConfig] = None,
     normalize=None,
-) -> GCGResult:
+) -> BimodalAttackResult:
     if config is None:
-        config = GCGConfig()
+        config = BimodalAttackConfig()
     logger.setLevel(getattr(logging, config.verbosity))
-    gcg = GCG(model, tokenizer, processor, config, normalize)
-    return gcg.run(messages, goal, target, image)
+    BimodalAttack = BimodalAttack(model, tokenizer, processor, config, normalize)
+    return BimodalAttack.run(messages, goal, target, image)

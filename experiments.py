@@ -13,8 +13,8 @@ import torch
 import torchvision.transforms as T
 from PIL import Image
 
-from nanogcg import GCGConfig
-import nanogcg
+from bimodalattack import GCGConfig
+import bimodalattack
 from utils.experiments_utils import (
     load_advbench_dataset,
     get_experiment_folder,
@@ -81,7 +81,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
 
         try:
             start_time = time.time()
-            result = nanogcg.run(
+            result = bimodalattack.run(
                 model,
                 tokenizer,
                 processor,
@@ -96,7 +96,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             run_loss = result.best_loss
             run_losses = result.losses
         except Exception:
-            from nanogcg import GCGResult
+            from bimodalattack import GCGResult
 
             result = GCGResult(
                 best_loss=float("nan"),
