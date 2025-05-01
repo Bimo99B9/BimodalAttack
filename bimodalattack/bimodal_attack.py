@@ -12,7 +12,11 @@ import transformers
 from torch import Tensor
 from transformers import set_seed
 
-from bimodalattack.utils import INIT_CHARS, find_executable_batch_size, get_nonascii_toks
+from bimodalattack.utils import (
+    INIT_CHARS,
+    find_executable_batch_size,
+    get_nonascii_toks,
+)
 
 from PIL import Image
 import torchvision.transforms.functional as F
@@ -65,7 +69,6 @@ class BimodalAttackConfig:
     joint_eval: bool = False
     experiment_folder: str = "experiments/missing_folder"
     images_folder: str = "experiments/missing_folder/images"
-    pgd_after_gcg: bool = False
     model: str = "llava"
 
 
@@ -267,18 +270,14 @@ class BimodalAttack:
             set_seed(config.seed)
             torch.use_deterministic_algorithms(True, warn_only=True)
 
+        # Normalize messages
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
         else:
             messages = copy.deepcopy(messages)
         logger.info(f"Messages 0: {messages}")
 
-        if isinstance(messages, str):
-            messages = [{"role": "user", "content": messages}]
-        else:
-            messages = copy.deepcopy(messages)
-            logger.info(f"Messages 1: {messages}")
-
+        # Ensure optim placeholder
         if (
             isinstance(messages[-1]["content"], str)
             and "{optim_str}" not in messages[-1]["content"]
@@ -286,526 +285,368 @@ class BimodalAttack:
             messages[-1]["content"] = messages[-1]["content"] + " {optim_str}"
             logger.info(f"Messages 2: {messages}")
 
+        # Insert image token for PGD
         if config.pgd_attack:
-            if isinstance(messages[-1]["content"], str):
+            cont = messages[-1]["content"]
+            if isinstance(cont, str):
                 messages[-1]["content"] = [
-                    {"type": "text", "text": messages[-1]["content"]},
+                    {"type": "text", "text": cont},
                     {"type": "image"},
                 ]
-                logger.info(f"Messages 3: {messages}")
-            elif isinstance(messages[-1]["content"], list):
-                if not any(
-                    item.get("type") == "image" for item in messages[-1]["content"]
-                ):
-                    messages[-1]["content"].append({"type": "image"})
+            elif isinstance(cont, list) and not any(
+                item.get("type") == "image" for item in cont
+            ):
+                messages[-1]["content"].append({"type": "image"})
         logger.info(f"Messages 4: {messages}")
 
+        # Build prompt
         prompt = self.processor.apply_chat_template(
             messages, add_generation_prompt=True
         )
         logger.info(f"Prompt after applying chat template: {prompt}")
 
+        # Strip BOS
         if tokenizer.bos_token and prompt.startswith(tokenizer.bos_token):
             prompt = prompt.replace(tokenizer.bos_token, "")
         logger.info(f"Prompt after removing BOS token: {prompt}")
 
+        # Tokenize before/after segments
         if config.pgd_attack:
+            # Split prompt into before_img_str, before_suffix_str, after_str
             if self.processor.__class__.__name__ == "Gemma3Processor":
-                # First, split the prompt on the optimization placeholder.
                 before_str, after_temp = prompt.split("{optim_str}", 1)
                 before_img_str = before_str.strip()
-                # Use partition to retain the <start_of_image> token in the result.
                 if "<start_of_image>" in after_temp:
                     before_suffix, sep, after_str = after_temp.partition(
                         "<start_of_image>"
                     )
-                    # Combine the text before the token with the token itself.
                     before_suffix_str = (before_suffix + sep).strip()
-                    after_str = (
-                        after_str.strip()
-                    )  # Keep any remaining tokens (like <end_of_turn>) intact.
+                    after_str = after_str.strip()
                 else:
                     raise ValueError(
                         "Expected <start_of_image> token in Gemma PGD prompt."
                     )
             else:
                 if "<start_of_image>" in prompt:
-                    before_img_str, after_img_str = prompt.split("<start_of_image>", 1)
+                    before_img_str, after_temp = prompt.split("<start_of_image>", 1)
                 elif "<image>" in prompt:
-                    before_img_str, after_img_str = prompt.split("<image>", 1)
+                    before_img_str, after_temp = prompt.split("<image>", 1)
                 else:
                     raise ValueError("No image token found in prompt for PGD attack")
-                before_suffix_str, after_str = after_img_str.split("{optim_str}", 1)
+                before_suffix_str, after_str = after_temp.split("{optim_str}", 1)
 
+            # Log segments
             logger.info(f"Before image str: {before_img_str}")
             logger.info(f"Before suffix str: {before_suffix_str}")
             logger.info(f"After str: {after_str}")
             logger.info(f"Target: {target}")
 
-            before_img_ids = tokenizer(
-                before_img_str, padding=False, return_tensors="pt"
-            )["input_ids"].to(model.device, torch.int64)
-            before_suffix_ids = tokenizer(
-                before_suffix_str, padding=False, return_tensors="pt"
-            )["input_ids"].to(model.device, torch.int64)
+            # Token IDs
+            before_img_ids = tokenizer(before_img_str, return_tensors="pt")[
+                "input_ids"
+            ].to(model.device)
+            before_suffix_ids = tokenizer(before_suffix_str, return_tensors="pt")[
+                "input_ids"
+            ].to(model.device)
             after_ids = tokenizer(
                 after_str, add_special_tokens=False, return_tensors="pt"
-            )["input_ids"].to(model.device, torch.int64)
+            )["input_ids"].to(model.device)
             target_ids = tokenizer(
                 target, add_special_tokens=False, return_tensors="pt"
-            )["input_ids"].to(model.device, torch.int64)
+            )["input_ids"].to(model.device)
+
+            # Embeddings
+            self.before_img_ids = before_img_ids
+            self.before_suffix_ids = before_suffix_ids
+            self.after_ids = after_ids
+            self.target_ids = target_ids
+            (
+                self.before_img_embeds,
+                self.before_suffix_embeds,
+                self.after_embeds,
+                self.target_embeds,
+            ) = [
+                self.embedding_layer(x)
+                for x in (before_img_ids, before_suffix_ids, after_ids, target_ids)
+            ]
         else:
             before_str, after_str = prompt.split("{optim_str}")
             logger.info(f"Before str: {before_str}")
             logger.info(f"After str: {after_str}")
             logger.info(f"Target: {target}")
-            before_ids = tokenizer(before_str, padding=False, return_tensors="pt")[
-                "input_ids"
-            ].to(model.device, torch.int64)
+
+            before_ids = tokenizer(before_str, return_tensors="pt")["input_ids"].to(
+                model.device
+            )
             after_ids = tokenizer(
                 after_str, add_special_tokens=False, return_tensors="pt"
-            )["input_ids"].to(model.device, torch.int64)
+            )["input_ids"].to(model.device)
             target_ids = tokenizer(
                 target, add_special_tokens=False, return_tensors="pt"
-            )["input_ids"].to(model.device, torch.int64)
+            )["input_ids"].to(model.device)
 
-        if config.pgd_attack:
-            before_img_embeds, before_suffix_embeds, after_embeds, target_embeds = [
-                self.embedding_layer(ids)
-                for ids in (before_img_ids, before_suffix_ids, after_ids, target_ids)
-            ]
-            self.before_img_ids = before_img_ids
-            self.before_suffix_ids = before_suffix_ids
-            self.after_ids = after_ids
-            self.target_ids = target_ids
-            self.before_img_embeds = before_img_embeds
-            self.before_suffix_embeds = before_suffix_embeds
-            self.after_embeds = after_embeds
-            self.target_embeds = target_embeds
-        else:
-            before_embeds, after_embeds, target_embeds = [
-                self.embedding_layer(ids) for ids in (before_ids, after_ids, target_ids)
+            self.before_embeds, self.after_embeds, self.target_embeds = [
+                self.embedding_layer(x) for x in (before_ids, after_ids, target_ids)
             ]
             self.target_ids = target_ids
-            self.before_embeds = before_embeds
-            self.after_embeds = after_embeds
-            self.target_embeds = target_embeds
 
-        ### Attack buffer initialization
+        # Initialize buffer & starting candidate
         buffer = self.init_buffer(image)
         optim_ids = buffer.get_best_ids()
 
-        # Containers for metrics and outputs.
-        losses = []
-        optim_strings = []
-        adv_suffixes = []
-        model_outputs = []
-        gradient_times = []
-        sampling_times = []
-        loss_times = []
-        pgd_times = []
-        total_times = []
+        # Containers for metrics
+        losses, optim_strings, adv_suffixes, model_outputs = [], [], [], []
+        gradient_times, sampling_times, loss_times, pgd_times, total_times = (
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        total_gradient_time = total_sampling_time = total_loss_time = total_pgd_time = (
+            0.0
+        )
 
-        total_gradient_time = 0.0
-        total_sampling_time = 0.0
-        total_loss_time = 0.0
-        total_pgd_time = 0.0
-
-        # llama_guard_found_unsafe = False
-
-        # Initialize variables to track the best candidate (lowest loss).
         best_loss = float("inf")
-        best_optim_ids = None
-        best_image = None
+        best_optim_ids = best_image = None
         current_loss = None
 
         if config.pgd_attack:
             logger.warning(f"Using alpha: {config.alpha}, eps: {config.eps}")
-            image.requires_grad = True
+            image.requires_grad_(True)
             image_original = image.clone()
 
-        # Log the overall configuration.
+        # Log attack mode
         if config.pgd_attack and config.gcg_attack:
-            if config.pgd_after_gcg:
-                logger.info(
-                    "Running GCG and PGD with PGD after GCG (GRADS -> GCG -> GRADS -> PGD)"
-                )
-            else:
-                logger.info("Running PGD and GCG (GRADS -> PGD -> GRADS -> GCG)")
-        elif config.pgd_attack and not config.gcg_attack:
-            logger.info("Running only PGD (GRADS -> PGD)")
-        elif config.gcg_attack and not config.pgd_attack:
-            logger.info("Running only GCG (GRADS -> GCG)")
+            logger.info("Running PGD and GCG")
+        elif config.pgd_attack:
+            logger.info("Running only PGD")
+        else:
+            logger.info("Running only GCG")
 
+        # Main loop
         for i in tqdm(range(config.num_steps)):
             logger.info(
-                f"[Iteration {i}] Starting iteration with config: pgd_attack={config.pgd_attack}, gcg_attack={config.gcg_attack}, pgd_after_gcg={config.pgd_after_gcg}"
+                f"[Iteration {i}] Starting (pgd={config.pgd_attack}, gcg={config.gcg_attack})"
             )
 
-            ### Phase A - Initial gradient computation (GRADS)
-            start_grad = time.perf_counter()
+            # Phase A: compute gradient
+            start = time.perf_counter()
             if config.pgd_attack:
-                optim_ids_onehot_grad, image_grad = self.compute_gradient(
-                    optim_ids, image
-                )
+                optim_grad, image_grad = self.compute_gradient(optim_ids, image)
             else:
-                optim_ids_onehot_grad, _ = self.compute_gradient(optim_ids)
-            grad_time = time.perf_counter() - start_grad
+                optim_grad, _ = self.compute_gradient(optim_ids)
+            grad_time = time.perf_counter() - start
             gradient_times.append(grad_time)
             total_gradient_time += grad_time
-            logger.info(
-                f"[Iteration {i}] Phase A (GRADS) completed in {grad_time:.4f}s"
-            )
+            logger.info(f"[{i}] Phase A (GRADS) in {grad_time:.4f}s")
 
-            # Depending on ordering, either perform PGD update now (phases B & C) or skip them.
-            if config.pgd_attack and not config.pgd_after_gcg:
-                logger.info(f"[Iteration {i}] Running PGD before GCG (Phase B)")
-                start_pgd = time.perf_counter()
-
+            # Phase B/C: PGD before GCG
+            if config.pgd_attack:
+                logger.info(f"[{i}] Phase B (PGD before GCG)")
+                start = time.perf_counter()
                 image = self.perform_pgd_step(
                     image, config.eps, config.alpha, image_grad, image_original
                 )
-                # image = self.perform_autopgd_step(
-                # image, config.eps, image_grad, image_original, current_loss, i
-                # )
+                pgd_t = time.perf_counter() - start
+                pgd_times.append(pgd_t)
+                total_pgd_time += pgd_t
+                logger.info(f"[{i}] Phase B in {pgd_t:.4f}s")
 
-                pgd_time = time.perf_counter() - start_pgd
-                pgd_times.append(pgd_time)
-                total_pgd_time += pgd_time
-                logger.info(
-                    f"[Iteration {i}] Phase B (PGD update) completed in {pgd_time:.4f}s"
-                )
-
-                ### Phase C - Recompute gradient after PGD update. Do not recompute gradients if using joint eval.
                 if config.gcg_attack and not config.joint_eval:
-                    start_grad = time.perf_counter()
-                    optim_ids_onehot_grad, image_grad = self.compute_gradient(
-                        optim_ids, image
-                    )
-                    grad_time = time.perf_counter() - start_grad
-                    gradient_times.append(grad_time)
-                    total_gradient_time += grad_time
-                    logger.info(
-                        f"[Iteration {i}] Phase C (Recompute GRADS) completed in {grad_time:.4f}s"
-                    )
-            elif config.pgd_after_gcg:
-                logger.info(
-                    f"[Iteration {i}] Skipping PGD update (B) and second GRADS (C) due to pgd_after_gcg flag; will perform PGD after GCG"
-                )
+                    logger.info(f"[{i}] Phase C (GRADS after PGD)")
+                    start = time.perf_counter()
+                    optim_grad, image_grad = self.compute_gradient(optim_ids, image)
+                    g2 = time.perf_counter() - start
+                    gradient_times.append(g2)
+                    total_gradient_time += g2
+                    logger.info(f"[{i}] Phase C in {g2:.4f}s")
             else:
-                pgd_time = 0.0
-                logger.info(
-                    f"[Iteration {i}] Skipping PGD update (B) and second GRADS (C) due to no PGD attack"
-                )
+                pgd_t = 0.0
+                logger.info(f"[{i}] Skipping PGD")
 
-            ### Phase D - GCG candidate sampling and (partial) loss computation.
-            logger.info(f"[Iteration {i}] Running GCG candidate sampling (Phase D)")
-            sampled_ids, new_search_width, sampling_time, total_sampling_time = (
-                self.candidate_sampling(
-                    config,
-                    i,
-                    optim_ids,
-                    optim_ids_onehot_grad,
-                    tokenizer,
-                    sampling_times,
-                    total_sampling_time,
-                )
+            # Phase D: sample & partial loss
+            logger.info(f"[{i}] Phase D (GCG sampling)")
+            sampled_ids, new_w, samp_t, total_sampling_time = self.candidate_sampling(
+                config,
+                i,
+                optim_ids,
+                optim_grad,
+                tokenizer,
+                sampling_times,
+                total_sampling_time,
             )
-            logger.info(
-                f"[Iteration {i}] Sampled {new_search_width} candidates in {sampling_time:.4f}s"
-            )
+            sampling_times.append(samp_t)
+            logger.info(f"[{i}] Sampled {new_w} candidates in {samp_t:.4f}s")
 
             with torch.no_grad():
-                start_loss = time.perf_counter()
-                batch_size = (
-                    new_search_width if config.batch_size is None else config.batch_size
-                )
+                start = time.perf_counter()
+                batch_size = new_w if config.batch_size is None else config.batch_size
 
                 if config.pgd_attack:
-                    pixel_values = self.normalize(image)
+                    # extract image features
+                    px = self.normalize(image)
                     if self.processor.__class__.__name__ == "Gemma3Processor":
-                        image_features = model.get_image_features(
-                            pixel_values=pixel_values
-                        )
+                        img_feats = model.get_image_features(pixel_values=px)
                     else:
-                        image_features = model.get_image_features(
-                            pixel_values=pixel_values,
+                        img_feats = model.get_image_features(
+                            pixel_values=px,
                             vision_feature_layer=-2,
                             vision_feature_select_strategy="default",
                         )
 
-                    if config.pgd_after_gcg:
-                        if config.joint_eval:
-                            candidate_input_embeds = self._build_input_embeds_gcg_pgd(
-                                sampled_ids,
-                                image_features,
-                                search_width=new_search_width,
-                                single=True,
-                            )
-
-                            loss = find_executable_batch_size(
-                                self._compute_candidates_loss_original, batch_size
-                            )(candidate_input_embeds)
-                            best_loss_before_image = loss.min().item()
-                            best_idx = loss.argmin()
-                        else:
-                            if config.gcg_attack:
-                                candidate_input_embeds = self._build_input_embeds_gcg(
-                                    sampled_ids,
-                                    search_width=new_search_width,
-                                    single=True,
-                                )
-
-                                loss = find_executable_batch_size(
-                                    self._compute_candidates_loss_original, batch_size
-                                )(candidate_input_embeds)
-                                best_loss_before_image = loss.min().item()
-                                best_idx = loss.argmin()
-                            else:
-                                best_loss_before_image = 0.0
-                                best_idx = 0
-                        logger.info(
-                            f"[Iteration {i}] [GCG] Selected candidate index {best_idx} (pre-PGD update), loss before image evaluation: {best_loss_before_image:.4f}"
+                    # Standard combined PGD+GCG evaluation
+                    if config.joint_eval:
+                        cand_emb = self._build_input_embeds(
+                            sampled_ids,
+                            image=img_feats,
+                            search_width=new_w,
+                            mode="pgd",
+                            single=True,
                         )
-                        chosen_candidate = sampled_ids[best_idx].unsqueeze(0)
+                    elif config.gcg_attack:
+                        cand_emb = self._build_input_embeds(
+                            sampled_ids,
+                            image=None,
+                            search_width=new_w,
+                            mode="gcg",
+                            single=True,
+                        )
                     else:
-                        if config.joint_eval:
-                            candidate_input_embeds = self._build_input_embeds_pgd(
-                                sampled_ids,
-                                image_features,
-                                search_width=new_search_width,
-                                single=True,
-                            )
+                        cand_emb = None
 
-                            loss = find_executable_batch_size(
-                                self._compute_candidates_loss_original, batch_size
-                            )(candidate_input_embeds)
-                            best_loss_before_image = loss.min().item()
-                            best_idx = loss.argmin()
-                        else:
-                            if config.gcg_attack:
-                                candidate_input_embeds = self._build_input_embeds_gcg(
-                                    sampled_ids,
-                                    search_width=new_search_width,
-                                    single=True,
-                                )
+                    if cand_emb is not None:
+                        loss_vec = find_executable_batch_size(
+                            self._compute_candidates_loss_original, batch_size
+                        )(cand_emb)
+                        best_before = loss_vec.min().item()
+                        best_idx = loss_vec.argmin()
+                    else:
+                        best_before, best_idx = 0.0, 0
 
-                                loss = find_executable_batch_size(
-                                    self._compute_candidates_loss_original, batch_size
-                                )(candidate_input_embeds)
-                                best_loss_before_image = loss.min().item()
-                                best_idx = loss.argmin()
-                            else:
-                                best_loss_before_image = 0.0
-                                best_idx = 0
-                        logger.info(
-                            f"[Iteration {i}] Best loss before evaluation with image: {best_loss_before_image:.4f}"
-                        )
-                        full_input_embeds = self._build_input_embeds_gcg_pgd(
-                            sampled_ids[best_idx].unsqueeze(0), image_features
-                        )
+                    logger.info(f"[{i}] Best loss before image eval: {best_before:.4f}")
 
-                        full_loss = self._compute_candidates_loss_original(
-                            1, full_input_embeds
-                        )
-                        current_loss = full_loss.item()
-                        optim_ids = sampled_ids[best_idx].unsqueeze(0)
-
-                        losses.append(current_loss)
-                        optim_str = tokenizer.batch_decode(optim_ids)[0]
-                        optim_strings.append(optim_str)
-                        if buffer.size == 0 or current_loss < buffer.get_highest_loss():
-                            buffer.add(current_loss, optim_ids)
-                        # Update best candidate if this loss is the lowest so far.
-                        if current_loss < best_loss:
-                            best_loss = current_loss
-                            best_optim_ids = optim_ids.clone()
-                            best_image = image.clone()
-
-                        logger.info(
-                            f"[Iteration {i}] Final loss with image and suffix: {current_loss:.4f}"
-                        )
-                else:  # GCG without PGD.
-                    candidate_input_embeds = self._build_input_embeds_gcg(
-                        sampled_ids, search_width=new_search_width, no_joint_eval=True
+                    # Full evaluation with image
+                    full_emb = self._build_input_embeds(
+                        sampled_ids[best_idx].unsqueeze(0),
+                        image=img_feats,
+                        mode="gcg_pgd",
                     )
-                    loss = find_executable_batch_size(
+                    current_loss = self._compute_candidates_loss_original(
+                        1, full_emb
+                    ).item()
+                    optim_ids = sampled_ids[best_idx].unsqueeze(0)
+
+                    # record
+                    losses.append(current_loss)
+                    s = tokenizer.batch_decode(optim_ids)[0]
+                    optim_strings.append(s)
+                    if buffer.size == 0 or current_loss < buffer.get_highest_loss():
+                        buffer.add(current_loss, optim_ids)
+                    if current_loss < best_loss:
+                        best_loss, best_optim_ids, best_image = (
+                            current_loss,
+                            optim_ids.clone(),
+                            image.clone(),
+                        )
+
+                    logger.info(f"[{i}] Final loss with image: {current_loss:.4f}")
+                else:
+                    # GCG only
+                    cand_emb = self._build_input_embeds(
+                        sampled_ids,
+                        image=None,
+                        search_width=new_w,
+                        mode="gcg",
+                        no_joint_eval=True,
+                    )
+                    loss_vec = find_executable_batch_size(
                         self._compute_candidates_loss_original, batch_size
-                    )(candidate_input_embeds)
-                    current_loss = loss.min().item()
-                    best_idx = loss.argmin()
+                    )(cand_emb)
+                    best_idx = loss_vec.argmin()
+                    current_loss = loss_vec.min().item()
                     optim_ids = sampled_ids[best_idx].unsqueeze(0)
 
                     losses.append(current_loss)
-                    optim_str = tokenizer.batch_decode(optim_ids)[0]
-                    optim_strings.append(optim_str)
+                    s = tokenizer.batch_decode(optim_ids)[0]
+                    optim_strings.append(s)
                     if buffer.size == 0 or current_loss < buffer.get_highest_loss():
                         buffer.add(current_loss, optim_ids)
-                    # Update best candidate (no image available in non-PGD mode).
                     if current_loss < best_loss:
-                        best_loss = current_loss
-                        best_optim_ids = optim_ids.clone()
+                        best_loss, best_optim_ids = current_loss, optim_ids.clone()
 
-                    logger.info(
-                        f"[Iteration {i}] Final loss with only suffix: {current_loss:.4f}"
-                    )
+                    logger.info(f"[{i}] Final loss (GCG only): {current_loss:.4f}")
 
-                loss_time = time.perf_counter() - start_loss
-                loss_times.append(loss_time)
-                total_loss_time += loss_time
-                logger.info(
-                    f"[Iteration {i}] Loss computation completed in {loss_time:.4f}s"
-                )
+                loss_t = time.perf_counter() - start
+                loss_times.append(loss_t)
+                total_loss_time += loss_t
+                logger.info(f"[{i}] Phase D loss in {loss_t:.4f}s")
 
-            # End Phase D
-
-            # If PGD is to run after GCG, do it here.
-            if config.pgd_after_gcg and config.pgd_attack:
-                logger.info(
-                    f"[Iteration {i}] Running PGD after GCG: computing gradient (Phase E)"
-                )
-                start_grad = time.perf_counter()
-                optim_ids_onehot_grad, image_grad = self.compute_gradient(
-                    optim_ids, image
-                )
-                grad_time = time.perf_counter() - start_grad
-                gradient_times.append(grad_time)
-                total_gradient_time += grad_time
-                logger.info(
-                    f"[Iteration {i}] Phase E (GRADS after GCG) completed in {grad_time:.4f}s"
-                )
-
-                logger.info(
-                    f"[Iteration {i}] Running PGD after GCG: PGD update (Phase F)"
-                )
-                start_pgd = time.perf_counter()
-                image = self.perform_pgd_step(
-                    image, config.eps, config.alpha, image_grad, image_original
-                )
-                # image = self.perform_autopgd_step(
-                #     image, config.eps, image_grad, image_original, current_loss, i
-                # )
-
-                pgd_time = time.perf_counter() - start_pgd
-                pgd_times.append(pgd_time)
-                total_pgd_time += pgd_time
-                logger.info(
-                    f"[Iteration {i}] Phase F (PGD update after GCG) completed in {pgd_time:.4f}s"
-                )
-
-                with torch.no_grad():
-                    start_loss = time.perf_counter()
-                    pixel_values = self.normalize(image)
-                    if self.processor.__class__.__name__ == "Gemma3Processor":
-                        image_features = model.get_image_features(
-                            pixel_values=pixel_values
-                        )
-                    else:
-                        image_features = model.get_image_features(
-                            pixel_values=pixel_values,
-                            vision_feature_layer=-2,
-                            vision_feature_select_strategy="default",
-                        )
-
-                    full_input_embeds = self._build_input_embeds_gcg_pgd(
-                        chosen_candidate, image_features
-                    )
-
-                    full_loss = self._compute_candidates_loss_original(
-                        1, full_input_embeds
-                    )
-                    current_loss = full_loss.item()
-                    optim_ids = chosen_candidate
-                    logger.info(
-                        f"[Iteration {i}] Final loss after [PGD after GCG]: {current_loss:.4f}"
-                    )
-                    loss_time = time.perf_counter() - start_loss
-                    loss_times.append(loss_time)
-                    total_loss_time += loss_time
-
-                    losses.append(current_loss)
-                    optim_str = tokenizer.batch_decode(optim_ids)[0]
-                    optim_strings.append(optim_str)
-                    if buffer.size == 0 or current_loss < buffer.get_highest_loss():
-                        buffer.add(current_loss, optim_ids)
-                    # Also update best candidate if needed.
-                    if current_loss < best_loss:
-                        best_loss = current_loss
-                        best_optim_ids = optim_ids.clone()
-                        best_image = image.clone()
-
-            # Save image and (optionally) generate debug output.
+            # Save image
             if config.pgd_attack:
                 self._save_image(image, os.path.join(images_folder, f"{i}.png"))
+
+            # Debug output
             if config.debug_output and i % 10 == 0:
                 with torch.no_grad():
                     if config.pgd_attack:
-                        pixel_values = self.normalize(image)
+                        px = self.normalize(image)
                         if self.processor.__class__.__name__ == "Gemma3Processor":
-                            image_features = model.get_image_features(
-                                pixel_values=pixel_values
-                            )
+                            img_feats = model.get_image_features(pixel_values=px)
                         else:
-                            image_features = model.get_image_features(
-                                pixel_values=pixel_values,
+                            img_feats = model.get_image_features(
+                                pixel_values=px,
                                 vision_feature_layer=-2,
                                 vision_feature_select_strategy="default",
                             )
-
-                        input_embeds = self._build_input_embeds_gcg_pgd(
+                        input_embeds = self._build_input_embeds(
                             sampled_ids,
-                            image_features,
-                            search_width=new_search_width,
+                            image=img_feats,
+                            search_width=new_w,
+                            mode="gcg_pgd",
                             no_target=True,
                         )
                     else:
-                        input_embeds = self._build_input_embeds_gcg(
-                            sampled_ids, search_width=new_search_width, no_target=True
+                        input_embeds = self._build_input_embeds(
+                            sampled_ids,
+                            image=None,
+                            search_width=new_w,
+                            mode="gcg",
+                            no_target=True,
                         )
-
-                    generated_ids = model.generate(
+                    gen_ids = model.generate(
                         inputs_embeds=input_embeds, max_new_tokens=120
                     )
-                    gen_output = tokenizer.decode(
-                        generated_ids[0], skip_special_tokens=True
-                    )
+                    gen_output = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
                     logger.info(f"Output generated at iteration {i}: {gen_output}")
-
+                model_outputs.append(gen_output)
             else:
-                gen_output = ""
-            model_outputs.append(gen_output)
+                model_outputs.append("")
+
             adv_suffixes.append(tokenizer.batch_decode(optim_ids)[0])
             buffer.log_buffer(tokenizer)
 
             if self.stop_flag:
-                logger.info("Early stopping due to finding a perfect match.")
+                logger.info("Early stopping due to perfect match.")
                 break
 
-            iter_total = grad_time + sampling_time + pgd_time + loss_time
+            iter_total = grad_time + samp_t + pgd_t + loss_t
             total_times.append(iter_total)
             logger.info(
-                f"[Iteration {i}] Total iteration time: {iter_total:.4f}s "
-                f"(Gradient: {grad_time:.4f}s, Sampling: {sampling_time:.4f}s, PGD: {pgd_time:.4f}s, Loss: {loss_time:.4f}s)"
+                f"[{i}] Total time: {iter_total:.4f}s "
+                f"(Grad: {grad_time:.4f}s, Samp: {samp_t:.4f}s, PGD: {pgd_t:.4f}s, Loss: {loss_t:.4f}s)"
             )
 
         num_iters = i + 1
-        logger.warning(
-            f"Average token gradient time: {total_gradient_time / num_iters:.4f}s"
-        )
-        logger.warning(
-            f"Average PGD image update time: {total_pgd_time / num_iters:.4f}s"
-        )
-        logger.warning(
-            f"Average candidate sampling time: {total_sampling_time / num_iters:.4f}s"
-        )
-        logger.warning(
-            f"Average candidate loss computation time: {total_loss_time / num_iters:.4f}s"
-        )
+        logger.warning(f"Avg grad time: {total_gradient_time/num_iters:.4f}s")
+        logger.warning(f"Avg PGD time: {total_pgd_time/num_iters:.4f}s")
+        logger.warning(f"Avg sampling time: {total_sampling_time/num_iters:.4f}s")
+        logger.warning(f"Avg loss time: {total_loss_time/num_iters:.4f}s")
 
-        min_loss_index = losses.index(min(losses))
-        result = BimodalAttackResult(
-            best_loss=losses[min_loss_index],
-            best_string=optim_strings[min_loss_index],
+        min_idx = losses.index(min(losses))
+        return BimodalAttackResult(
+            best_loss=losses[min_idx],
+            best_string=optim_strings[min_idx],
             losses=losses,
             strings=optim_strings,
             adversarial_suffixes=adv_suffixes,
@@ -816,7 +657,6 @@ class BimodalAttack:
             pgd_times=pgd_times,
             total_times=total_times,
         )
-        return result
 
     def init_buffer(self, image) -> AttackBuffer:
         model = self.model
@@ -877,16 +717,19 @@ class BimodalAttack:
                     vision_feature_layer=-2,
                     vision_feature_select_strategy="default",
                 )
-
-            init_buffer_embeds = self._build_input_embeds_gcg_pgd(
+            init_buffer_embeds = self._build_input_embeds(
                 init_buffer_ids,
-                image_features,
+                image=image_features,
                 search_width=true_buffer_size,
+                mode="gcg_pgd",
                 single=True,
             )
         else:
-            init_buffer_embeds = self._build_input_embeds_gcg(
-                init_buffer_ids, search_width=true_buffer_size, no_joint_eval=True
+            init_buffer_embeds = self._build_input_embeds(
+                init_buffer_ids,
+                search_width=true_buffer_size,
+                mode="gcg",
+                no_joint_eval=True,
             )
 
         ## Initial buffer loss computation
@@ -1218,57 +1061,6 @@ class BimodalAttack:
                 t = t.repeat(sw, 1, 1)
             parts.append(t)
         return torch.cat(parts, dim=1)
-
-    # backward compatibility wrappers
-    def _build_input_embeds_pgd(
-        self,
-        sampled_ids: Tensor,
-        image: Tensor,
-        search_width: int,
-        single: bool = False,
-    ) -> Tensor:
-        return self._build_input_embeds(
-            sampled_ids,
-            image=image,
-            search_width=search_width,
-            mode="pgd",
-            single=single,
-        )
-
-    def _build_input_embeds_gcg(
-        self,
-        sampled_ids: Tensor,
-        search_width: int,
-        single: bool = False,
-        no_joint_eval: bool = False,
-        no_target: bool = False,
-    ) -> Tensor:
-        return self._build_input_embeds(
-            sampled_ids,
-            image=None,
-            search_width=search_width,
-            mode="gcg",
-            single=single,
-            no_joint_eval=no_joint_eval,
-            no_target=no_target,
-        )
-
-    def _build_input_embeds_gcg_pgd(
-        self,
-        sampled_ids: Tensor,
-        image: Tensor,
-        search_width: Optional[int] = None,
-        single: bool = False,
-        no_target: bool = False,
-    ) -> Tensor:
-        return self._build_input_embeds(
-            sampled_ids,
-            image=image,
-            search_width=search_width,
-            mode="gcg_pgd",
-            single=single,
-            no_target=no_target,
-        )
 
     def _compute_candidates_loss_original(
         self, search_batch_size: int, input_embeds: Tensor

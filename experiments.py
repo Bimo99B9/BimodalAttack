@@ -296,7 +296,6 @@ if __name__ == "__main__":
     p.add_argument("--eps", type=str, required=True)
     p.add_argument("--debug_output", type=str2bool, required=True)
     p.add_argument("--joint_eval", type=str2bool, required=True)
-    p.add_argument("--pgd_after_gcg", type=str2bool, required=True)
     p.add_argument("--model", choices=["gemma", "llava"], required=True)
     args = p.parse_args()
 
@@ -351,7 +350,6 @@ if __name__ == "__main__":
         "alpha_str": args.alpha,
         "eps_str": args.eps,
         "joint_eval": args.joint_eval,
-        "pgd_after_gcg": args.pgd_after_gcg,
         "model": args.model,
     }
 
