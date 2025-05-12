@@ -1,3 +1,5 @@
+# experiments.py
+
 import argparse
 import csv
 import gc
@@ -15,6 +17,7 @@ from PIL import Image
 
 from bimodalattack import BimodalAttackConfig
 import bimodalattack
+from transformers import CLIPImageProcessor
 from utils.experiments_utils import (
     load_advbench_dataset,
     get_experiment_folder,
@@ -112,7 +115,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
                 total_times=[],
             )
             run_time, run_loss, run_losses = 0, float("nan"), []
-            
+
             logging.error(
                 f"Error during attack for prompt {idx}/{len(advbench_pairs)}: {goal} -> {target_text}"
             )
@@ -288,37 +291,60 @@ if __name__ == "__main__":
     p.add_argument("--name", required=True)
     p.add_argument("--num_steps", type=int, required=True)
     p.add_argument("--search_width", type=int, required=True)
-    p.add_argument("--dynamic_search", type=str2bool, required=True)
+    p.add_argument(
+        "--dynamic_search",
+        type=lambda x: x.lower() in ("y", "yes", "true"),
+        required=True,
+    )
     p.add_argument("--min_search_width", type=int, required=True)
-    p.add_argument("--pgd_attack", type=str2bool, required=True)
-    p.add_argument("--gcg_attack", type=str2bool, required=True)
+    p.add_argument(
+        "--pgd_attack", type=lambda x: x.lower() in ("y", "yes", "true"), required=True
+    )
+    p.add_argument(
+        "--gcg_attack", type=lambda x: x.lower() in ("y", "yes", "true"), required=True
+    )
     p.add_argument("--alpha", type=str, required=True)
     p.add_argument("--eps", type=str, required=True)
-    p.add_argument("--debug_output", type=str2bool, required=True)
-    p.add_argument("--joint_eval", type=str2bool, required=True)
-    p.add_argument("--model", choices=["gemma", "llava"], required=True)
+    p.add_argument(
+        "--debug_output",
+        type=lambda x: x.lower() in ("y", "yes", "true"),
+        required=True,
+    )
+    p.add_argument(
+        "--joint_eval", type=lambda x: x.lower() in ("y", "yes", "true"), required=True
+    )
+    p.add_argument(
+        "--model",
+        choices=["gemma", "llava", "llava-rc"],
+        required=True,
+        help="Choose 'gemma', 'llava', or 'llava-rc' (LLaVA with robust CLIP encoder)",
+    )
     args = p.parse_args()
+
+    # parse numeric fractions
+    def fraction_type(s):
+        if "/" in s:
+            n, d = s.split("/")
+            return float(n) / float(d)
+        return float(s)
 
     alpha = fraction_type(args.alpha)
     eps = fraction_type(args.eps)
-    MODEL_ID = (
-        "llava-hf/llava-1.5-7b-hf" if args.model == "llava" else "google/gemma-3-4b-it"
-    )
-    model, processor = load_model_and_processor(MODEL_ID)
 
+    # pick HF model id
     if args.model == "llava":
-        transform = T.Compose(
-            [
-                T.Lambda(lambda img: img.convert("RGB")),
-                T.Resize(336, interpolation=T.InterpolationMode.BICUBIC),
-                T.CenterCrop((336, 336)),
-                T.ToTensor(),
-            ]
-        )
-        normalize = T.Normalize(
-            [0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711]
-        )
+        MODEL_ID = "llava-hf/llava-1.5-7b-hf"
+    elif args.model == "llava-rc":
+        MODEL_ID = "llava-rc"
     else:
+        MODEL_ID = "google/gemma-3-4b-it"
+
+    # load
+    model, processor = load_model_and_processor(MODEL_ID)
+    tokenizer = processor.tokenizer
+
+    # set up transforms & normalize
+    if args.model == "gemma":
         transform = T.Compose(
             [
                 T.Lambda(lambda img: img.convert("RGB")),
@@ -328,8 +354,42 @@ if __name__ == "__main__":
             ]
         )
         normalize = T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-    tokenizer = processor.tokenizer
 
+    elif args.model == "llava":
+        # LLaVA default uses 336×336 & CLIP‐ViT‐L mean/std
+        transform = T.Compose(
+            [
+                T.Lambda(lambda img: img.convert("RGB")),
+                T.Resize(336, interpolation=T.InterpolationMode.BICUBIC),
+                T.CenterCrop((336, 336)),
+                T.ToTensor(),
+            ]
+        )
+        normalize = T.Normalize(
+            [0.48145466, 0.4578275, 0.40821073],
+            [0.26862954, 0.26130258, 0.27577711],
+        )
+
+    else:  # llava-rc
+        # use the attached CLIPImageProcessor from experiments_utils
+        clip_proc: CLIPImageProcessor = processor.image_processor
+        h = clip_proc.size["height"]
+        w = clip_proc.size["width"]
+        transform = T.Compose(
+            [
+                T.Lambda(lambda img: img.convert("RGB")),
+                T.Resize((h, w), interpolation=T.InterpolationMode.BICUBIC),
+                T.CenterCrop((h, w)),
+                T.ToTensor(),
+            ]
+        )
+        # CLIPImageProcessor exposes its normalization stats
+        normalize = T.Normalize(
+            clip_proc.image_mean,
+            clip_proc.image_std,
+        )
+
+    # load one test image for the attack pipeline
     raw = Image.open(
         requests.get(
             "http://images.cocodataset.org/val2017/000000039769.jpg", stream=True

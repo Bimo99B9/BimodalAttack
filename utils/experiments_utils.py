@@ -1,17 +1,19 @@
+# utils/experiments_utils.py
+
 #!/usr/bin/env python
 import logging
 import os
 import csv
-
 import torch
 from transformers import (
     AutoProcessor,
     LlavaForConditionalGeneration,
     Gemma3ForConditionalGeneration,
+    CLIPVisionModel,
+    CLIPImageProcessor,
 )
 
 
-# --- Load advbench dataset ---
 def load_advbench_dataset(filepath):
     pairs = []
     with open(filepath, newline="", encoding="utf-8") as csvfile:
@@ -21,81 +23,116 @@ def load_advbench_dataset(filepath):
     return pairs
 
 
-# --- Folder helper functions ---
-
-
 def get_experiment_folder():
-    base_dir = "experiments"
-    existing_experiments = [
+    base = "experiments"
+    exps = [
         d
-        for d in os.listdir(base_dir)
-        if os.path.isdir(os.path.join(base_dir, d)) and d.startswith("exp")
+        for d in os.listdir(base)
+        if os.path.isdir(os.path.join(base, d)) and d.startswith("exp")
     ]
-    max_num = 0
-    for d in existing_experiments:
+    maxn = 0
+    for d in exps:
         try:
-            num = int(d[3:])
-            if num > max_num:
-                max_num = num
+            n = int(d[3:])
+            maxn = max(maxn, n)
         except ValueError:
-            continue
-    new_exp_num = max_num + 1
-    experiment_folder_name = f"exp{new_exp_num}"
-    experiment_folder = os.path.join(base_dir, experiment_folder_name)
-    os.makedirs(experiment_folder, exist_ok=True)
-    return experiment_folder
+            pass
+    new = f"exp{maxn+1}"
+    path = os.path.join(base, new)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
-def get_images_folder(experiment_folder, pair_number):
-    images_folder = os.path.join(experiment_folder, f"images_{pair_number}")
-    os.makedirs(images_folder, exist_ok=True)
-    return images_folder
+def get_images_folder(exp_folder, idx):
+    p = os.path.join(exp_folder, f"images_{idx}")
+    os.makedirs(p, exist_ok=True)
+    return p
 
 
-def write_parameters_csv(experiment_folder, config_kwargs, seed, name, num_prompts):
-    parameters_csv_path = os.path.join(experiment_folder, "parameters.csv")
-    with open(parameters_csv_path, "w", newline="") as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(["Parameter", "Value"])
-        writer.writerow(["name", name])
-        for key, value in config_kwargs.items():
-            if key == "alpha":
-                if "alpha_str" in config_kwargs:
-                    writer.writerow(["alpha", config_kwargs["alpha_str"]])
-                else:
-                    writer.writerow([key, value])
-            elif key == "eps":
-                if "eps_str" in config_kwargs:
-                    writer.writerow(["eps", config_kwargs["eps_str"]])
-                else:
-                    writer.writerow([key, value])
-            elif key.endswith("_str"):
+def write_parameters_csv(exp_folder, config_kwargs, seed, name, num_prompts):
+    path = os.path.join(exp_folder, "parameters.csv")
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["Parameter", "Value"])
+        w.writerow(["name", name])
+        for k, v in config_kwargs.items():
+            if k == "alpha":
+                vstr = config_kwargs.get("alpha_str", v)
+                w.writerow(["alpha", vstr])
+            elif k == "eps":
+                vstr = config_kwargs.get("eps_str", v)
+                w.writerow(["eps", vstr])
+            elif k.endswith("_str"):
                 continue
             else:
-                writer.writerow([key, value])
-        writer.writerow(["seed", seed])
-        writer.writerow(["num_prompts", num_prompts])
-    logging.info(f"Saved parameters CSV to {parameters_csv_path}")
-
-
-# --- Load model and processor ---
+                w.writerow([k, v])
+        w.writerow(["seed", seed])
+        w.writerow(["num_prompts", num_prompts])
+    logging.info(f"Saved parameters CSV to {path}")
 
 
 def load_model_and_processor(model_id):
+    """
+    Supports:
+      - google/gemma-3-4b-it
+      - llava-hf/llava-1.5-7b-hf
+      - llava-rc   ← LLaVA w/ RCLIP ViT‐L backbone
+    """
+    # Gemma
+    if model_id == "google/gemma-3-4b-it":
+        m = Gemma3ForConditionalGeneration.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16, device_map="auto"
+        )
+        m.eval()
+        proc = AutoProcessor.from_pretrained(model_id, use_fast=True)
+        return m, proc
+
+    # Base LLaVA
     if model_id == "llava-hf/llava-1.5-7b-hf":
-        model = LlavaForConditionalGeneration.from_pretrained(
+        m = LlavaForConditionalGeneration.from_pretrained(
             model_id,
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
             attn_implementation="flash_attention_2",
         ).to("cuda")
-        processor = AutoProcessor.from_pretrained(model_id)
-    elif model_id == "google/gemma-3-4b-it":
-        model = Gemma3ForConditionalGeneration.from_pretrained(
-            model_id, torch_dtype=torch.bfloat16, device_map="auto"
-        )
-        model.eval()
-        processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
-    else:
-        raise ValueError(f"Model {model_id} not supported.")
-    return model, processor
+        m.eval()
+        proc = AutoProcessor.from_pretrained(model_id, use_fast=True)
+        return m, proc
+
+    # LLaVA + robust CLIP
+    if model_id == "llava-rc":
+        BASE = "llava-hf/llava-1.5-7b-hf"
+        CLIP_ID = "RCLIP/CLIP-ViT-L-FARE2"
+
+        # 1) load the robust CLIP vision tower
+        clip_vision = CLIPVisionModel.from_pretrained(
+            CLIP_ID, torch_dtype=torch.float16
+        ).to("cuda")
+        clip_vision.requires_grad_(False)
+
+        # 2) load the base LLaVA
+        llava = LlavaForConditionalGeneration.from_pretrained(
+            BASE,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+            attn_implementation="flash_attention_2",
+        ).to("cuda")
+        llava.eval()
+
+        # 3) swap in the RCLIP tower
+        llava.vision_tower = clip_vision
+
+        # 4) processor: start from LLaVA’s
+        proc = AutoProcessor.from_pretrained(BASE, use_fast=True)
+
+        # 5) attach a CLIPImageProcessor resized to the RCLIP size
+        img_proc = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
+        img_proc.size = {
+            "height": clip_vision.config.image_size,
+            "width": clip_vision.config.image_size,
+        }
+        proc.image_processor = img_proc
+
+        return llava, proc
+
+    raise ValueError(f"Unrecognized model_id {model_id}")

@@ -97,6 +97,8 @@ def main():
 
     if model_param == "llava":
         MODEL_ID = "llava-hf/llava-1.5-7b-hf"
+    elif model_param == "llava-rc":
+        MODEL_ID = "llava-rc"
     elif model_param == "gemma":
         MODEL_ID = "google/gemma-3-4b-it"
     else:
@@ -112,6 +114,8 @@ def main():
 
     mg_id = "meta-llama/Llama-Guard-3-8B"
     mg_tok = AutoTokenizer.from_pretrained(mg_id)
+    if mg_tok.pad_token is None:
+        mg_tok.pad_token = mg_tok.eos_token
     mg_mod = AutoModelForCausalLM.from_pretrained(
         mg_id,
         torch_dtype=torch.bfloat16,
@@ -171,10 +175,9 @@ def main():
                     "cuda", torch.float16
                 )
 
-            # generate and judge
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=200,
+                max_new_tokens=300,
                 do_sample=True,
                 num_return_sequences=k,
             )
@@ -188,7 +191,7 @@ def main():
                 ).strip()
                 try:
                     chat = parse_conversation(out_text)
-                except ValueError as e:
+                except ValueError:
                     logging.warning(f"[k={k}] Gen{idx_gen+1}: parse error, skipping")
                     continue
 
@@ -227,9 +230,10 @@ def main():
                     f.write(f"--- Gen {j} ---\n{txt}\nVerdict: {v}\nUnsafe: {u}\n\n")
 
         df = pd.DataFrame(summary)
-        summary_csv = os.path.join(eval_dir, "summary.csv")
-        df.to_csv(summary_csv, index=False)
-        logging.info(f"[k={k}] Summary saved to {summary_csv}")
+        df.to_csv(os.path.join(eval_dir, "summary.csv"), index=False)
+        logging.info(
+            f"[k={k}] Summary saved to {os.path.join(eval_dir, 'summary.csv')}"
+        )
 
         overall_file = os.path.join(eval_dir, "overall.txt")
         with open(overall_file, "w", encoding="utf-8") as f:
