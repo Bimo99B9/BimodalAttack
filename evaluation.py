@@ -124,7 +124,7 @@ def main():
 
     def moderate(chat):
         input_ids = mg_tok.apply_chat_template(chat, return_tensors="pt").to("cuda")
-        out = mg_mod.generate(input_ids=input_ids, max_new_tokens=100, pad_token_id=0)
+        out = mg_mod.generate(input_ids=input_ids, max_new_tokens=300, pad_token_id=0)
         plen = input_ids.shape[-1]
         return mg_tok.decode(out[0][plen:], skip_special_tokens=True).strip()
 
