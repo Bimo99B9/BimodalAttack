@@ -1,4 +1,4 @@
-name: myenv
+name: multimodal-attack
 channels:
   - nvidia
   - conda-forge

@@ -26,11 +26,15 @@ You can configure these modes using the `--pgd_attack` and `--gcg_attack` flags.
 
 ## 📦 Installation
 
+This project uses a `conda` environment. To get started:
+
+1. Create and activate the environment:
 ```bash
-pip install -r requirements.txt
+conda env create -f environment.yml
+conda activate multimodal-attack
 ```
 
-You must also install `flash-attn` if using LLaVA:
+2. (Optional) If you're using LLaVA-based models, install `flash-attn` for faster attention:
 ```bash
 pip install flash-attn --no-build-isolation
 ```
