@@ -2,21 +2,21 @@
 set -e
 
 # GPU device to use for all runs
-DEVICE=0
+DEVICE=1
 export CUDA_VISIBLE_DEVICES=$DEVICE
 
 # Ensure logs directory exists
 mkdir -p logs
 
 # Iterate over both models
-for MODEL in llava gemma; do
+for MODEL in llava gemma llava-rc; do
   echo "=== Testing $MODEL on GPU $DEVICE ==="
 
   # 1) PGD only
   CUDA_VISIBLE_DEVICES=$DEVICE python experiments.py \
     --name "${MODEL^} - PGD Only" \
     --model "$MODEL" \
-    --num_steps 5 \
+    --num_steps 3 \
     --search_width 0 \
     --dynamic_search False \
     --min_search_width 0 \
@@ -32,10 +32,10 @@ for MODEL in llava gemma; do
   CUDA_VISIBLE_DEVICES=$DEVICE python experiments.py \
     --name "${MODEL^} - GCG Only" \
     --model "$MODEL" \
-    --num_steps 5 \
-    --search_width 64 \
+    --num_steps 3 \
+    --search_width 32 \
     --dynamic_search False \
-    --min_search_width 64 \
+    --min_search_width 32 \
     --pgd_attack False \
     --gcg_attack True \
     --alpha "0/255" \
@@ -48,8 +48,8 @@ for MODEL in llava gemma; do
   CUDA_VISIBLE_DEVICES=$DEVICE python experiments.py \
     --name "${MODEL^} - PGD + GCG" \
     --model "$MODEL" \
-    --num_steps 5 \
-    --search_width 64 \
+    --num_steps 3 \
+    --search_width 32 \
     --dynamic_search False \
     --min_search_width 0 \
     --pgd_attack True \
@@ -64,8 +64,8 @@ for MODEL in llava gemma; do
   CUDA_VISIBLE_DEVICES=$DEVICE python experiments.py \
     --name "${MODEL^} - PGD + GCG JointEval" \
     --model "$MODEL" \
-    --num_steps 5 \
-    --search_width 64 \
+    --num_steps 3 \
+    --search_width 32 \
     --dynamic_search False \
     --min_search_width 0 \
     --pgd_attack True \

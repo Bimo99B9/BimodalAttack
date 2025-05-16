@@ -2,65 +2,48 @@
 # Ensure the script exits if any command fails
 set -e
 
-CUDA_VISIBLE_DEVICES=3 python experiments.py \
-    --name "Llava-RC - Joint" \
+CUDA_VISIBLE_DEVICES=1 python experiments.py \
+    --name "Llava - GCG Only" \
     --num_steps 600 \
     --search_width 512 \
     --dynamic_search False \
     --min_search_width 512 \
-    --pgd_attack True \
+    --pgd_attack False \
     --gcg_attack True \
-    --alpha "4/255" \
-    --eps "64/255" \
+    --alpha "0/255" \
+    --eps "0/255" \
     --debug_output False \
-    --joint_eval True \
-    --model "llava-rc" \
-    > logs/experiments_llavarc_joint.out 2>&1
+    --joint_eval False \
+    --model "llava" \
+    > logs/experiments_llava_gcg_max.out 2>&1
 
-# TODO:
-# CUDA_VISIBLE_DEVICES=6 python experiments.py \
-#     --name "Gemma - Joint Eval (High eps, DS)" \
-#     --num_steps 500 \
-#     --search_width 256 \
-#     --dynamic_search True \
-#     --min_search_width 32 \
-#     --pgd_attack True \
-#     --gcg_attack True \
-#     --alpha "4/255" \
-#     --eps "64/255" \
-#     --debug_output False \
-#     --joint_eval True \
-#     --model "gemma" \
-#     > logs/experiments_gemma_pgd_gcg_jointeval_ds.out 2>&1
-
-# TODO:
-# CUDA_VISIBLE_DEVICES=2 python experiments.py \
-#     --name "Gemma - Joint Eval (SW=128, 600 steps)" \
+# CUDA_VISIBLE_DEVICES=5 python experiments.py \
+#     --name "Llava-RC - GCG Only" \
 #     --num_steps 600 \
-#     --search_width 128 \
+#     --search_width 512 \
 #     --dynamic_search False \
-#     --min_search_width 128 \
-#     --pgd_attack True \
+#     --min_search_width 512 \
+#     --pgd_attack False \
 #     --gcg_attack True \
-#     --alpha "4/255" \
-#     --eps "64/255" \
+#     --alpha "0/255" \
+#     --eps "0/255" \
 #     --debug_output False \
-#     --joint_eval True \
-#     --model "gemma" \
-#     > logs/experiments_gemma_jointeval_sw128_600steps.out 2>&1
+#     --joint_eval False \
+#     --model "llava-rc" \
+#     > logs/experiments_llavarc_gcg_max.out 2>&1
 
 # TODO:
-# CUDA_VISIBLE_DEVICES=3 python experiments.py \
-#     --name "Gemma - Joint Eval (DS 128→64, 600 steps)" \
+# CUDA_VISIBLE_DEVICES=1 python experiments.py \
+#     --name "Llava-RC - GCG Only" \
 #     --num_steps 600 \
-#     --search_width 128 \
-#     --dynamic_search True \
-#     --min_search_width 64 \
-#     --pgd_attack True \
+#     --search_width 512 \
+#     --dynamic_search False \
+#     --min_search_width 512 \
+#     --pgd_attack False \
 #     --gcg_attack True \
-#     --alpha "4/255" \
-#     --eps "64/255" \
+#     --alpha "0/255" \
+#     --eps "0/255" \
 #     --debug_output False \
-#     --joint_eval True \
-#     --model "gemma" \
-#     > logs/experiments_gemma_jointeval_ds128to64_600steps.out 2>&1
+#     --joint_eval False \
+#     --model "llava-rc" \
+#     > logs/experiments_llavarc_gcg_max.out 2>&1
