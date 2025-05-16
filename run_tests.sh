@@ -2,14 +2,14 @@
 set -e
 
 # GPU device to use for all runs
-DEVICE=0
+DEVICE=1
 export CUDA_VISIBLE_DEVICES=$DEVICE
 
 # Ensure logs directory exists
 mkdir -p logs
 
 # Iterate over both models
-for MODEL in llava gemma; do
+for MODEL in llava gemma llava-rc; do
   echo "=== Testing $MODEL on GPU $DEVICE ==="
 
   # 1) PGD only
