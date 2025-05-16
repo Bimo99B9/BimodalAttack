@@ -152,7 +152,19 @@ Each experiment creates a folder under `experiments/expXX/`, e.g. `exp69/`, cont
 This project is based on and adapted from:
 - [nanoGCG (GraySwanAI)](https://github.com/GraySwanAI/nanoGCG)
 
-We extend their framework with PGD image perturbations, multimodal embedding fusion, robust image encoders, and evaluation tooling.
+We extend their framework with:
+- PGD image perturbations
+- Multimodal embedding fusion
+- Robust vision encoder integration (e.g., RCLIP) and Gemma integration
+- Evaluation tooling using moderation models and success@k
+
+---
+
+📚 This work was conducted as the semester **Research Project** of the Master's in Computer Science – Cybersecurity specialization at EPFL.
+
+👤 **Author**: [Daniel López Gala](https://www.linkedin.com/in/daniel-lopezgala/)  
+🏛️ **Laboratory**: [LIONS – Laboratory for Information and Inference Systems](https://www.epfl.ch/labs/lions/)  
+👨‍🏫 **Supervision**: Elías Abad Rocamora and Prof. Volkan Cevher
 
 ---
 
