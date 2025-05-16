@@ -12,7 +12,7 @@ We support the following attack modes:
 - **GCG-only**: Optimize textual suffixes to maximize model misalignment.
 - **Joint PGD + GCG**: Optimize both image and text jointly, with optional interleaved evaluation.
 
-You can configure these modes using the `--pgd_attack` and `--gcg_attack` flags.
+You can configure these modes using the `--pgd_attack` and `--gcg_attack` flags. Using `--joint_eval` will evaluate the GCG candidates using the perturbed image, allowing for a more robust attack.
 
 ---
 
@@ -107,7 +107,7 @@ This means that earlier iterations will explore a wider space of suffix candidat
 
 ## 🧪 Dataset: AdvBench
 
-We use prompts from `data/advbench/harmful_behaviors.csv`, a benchmark of harmful behavior goals and expected target completions.
+We use prompts from `data/advbench/harmful_behaviors.csv`, a benchmark of harmful behavior goals and expected target completions, to evaluate the attack's effectiveness.
 
 ---
 
@@ -160,7 +160,7 @@ We extend their framework with:
 
 ---
 
-📚 This work was conducted as the semester **Research Project** of the Master's in Computer Science – Cybersecurity specialization at EPFL.
+📚 This work was conducted as the semester **Research Project** of the Master's in Computer Science – Cybersecurity at EPFL.
 
 👤 **Author**: [Daniel López Gala](https://www.linkedin.com/in/daniel-lopezgala/)  
 🏛️ **Laboratory**: [LIONS – Laboratory for Information and Inference Systems](https://www.epfl.ch/labs/lions/)  
