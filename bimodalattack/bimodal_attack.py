@@ -656,6 +656,10 @@ class BimodalAttack:
                 logger.info(
                     f"[Iteration {i}] Loss computation completed in {loss_time:.4f}s"
                 )
+                logger.info(
+                    f"[Iteration {i}] Current loss: {current_loss:.4f} | "
+                    f"Best loss: {buffer.get_lowest_loss():.4f} | "
+                )
 
             # End Phase D
 
