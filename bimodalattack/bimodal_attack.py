@@ -1,6 +1,7 @@
 import copy
 import logging
 import time
+import gc
 
 from dataclasses import dataclass
 import numpy as np
@@ -1277,29 +1278,36 @@ class BimodalAttack:
     def _compute_candidates_loss_original(
         self, search_batch_size: int, input_embeds: Tensor
     ) -> Tensor:
-        with torch.no_grad():
-            outputs = self.model(inputs_embeds=input_embeds)
-            logits = outputs.logits
-            seq_len = input_embeds.size(1)
-            tgt_len = self.target_ids.numel()
-            offset = seq_len - tgt_len
-            shift_logits = logits[..., offset - 1 : -1, :].contiguous()
-            tgt = self.target_ids.squeeze()
-            if tgt.dim() != 1:
-                tgt = tgt.view(-1)
-            batch_size = shift_logits.size(0)
-            shift_labels = tgt.unsqueeze(0).expand(batch_size, -1).contiguous()
-            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-            flat_labels = shift_labels.view(-1)
-            loss_flat = torch.nn.functional.cross_entropy(
-                flat_logits, flat_labels, reduction="none"
-            )
-            losses = loss_flat.view(batch_size, -1).mean(dim=1)
-            if self.config.early_stop:
-                correct = torch.argmax(shift_logits, dim=-1) == shift_labels
-                if torch.any(correct.all(dim=-1)):
-                    self.stop_flag = True
-        return losses
+        all_loss = []
+        for i in range(0, input_embeds.shape[0], search_batch_size):
+            with torch.no_grad():
+                input_embeds_batch = input_embeds[i : i + search_batch_size]
+                current_batch_size = input_embeds_batch.shape[0]
+
+                outputs = self.model(inputs_embeds=input_embeds_batch)
+                logits = outputs.logits
+                tmp = input_embeds.shape[1] - self.target_ids.shape[1]
+                shift_logits = logits[..., tmp - 1 : -1, :].contiguous()
+                shift_labels = self.target_ids.repeat(current_batch_size, 1)
+
+                loss = torch.nn.functional.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    reduction="none",
+                )
+                loss = loss.view(current_batch_size, -1).mean(dim=-1)
+                all_loss.append(loss)
+                if self.config.early_stop:
+                    if torch.any(
+                        torch.all(
+                            torch.argmax(shift_logits, dim=-1) == shift_labels, dim=-1
+                        )
+                    ).item():
+                        self.stop_flag = True
+                del outputs
+                gc.collect()
+                torch.cuda.empty_cache()
+        return torch.cat(all_loss, dim=0)
 
     def _save_image(self, image, path):
         image = image.squeeze(0).detach().cpu().numpy()
