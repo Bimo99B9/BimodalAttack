@@ -1,5 +1,4 @@
 # experiments.py
-
 import argparse
 import csv
 import gc
@@ -32,14 +31,17 @@ logging.basicConfig(
 
 EXPERIMENT_SEED = 1
 USE_ALL_PROMPTS = False
-NUM_PROMPTS = 10
+NUM_PROMPTS = 20
 ADV_BENCH_FILE = "data/advbench/harmful_behaviors.csv"
 
 os.makedirs("experiments", exist_ok=True)
 
+# --------------------------------------------------------------------------- #
+# default AdvBench pairs (may be replaced by a custom one later)
 advbench_pairs = load_advbench_dataset(ADV_BENCH_FILE)
 if not USE_ALL_PROMPTS:
     advbench_pairs = advbench_pairs[:NUM_PROMPTS]
+# --------------------------------------------------------------------------- #
 
 
 def set_global_seed(seed):
@@ -55,6 +57,19 @@ def run_experiment(name, config_kwargs, advbench_pairs):
     torch.cuda.empty_cache()
     gc.collect()
     set_global_seed(EXPERIMENT_SEED)
+
+    # NEW -- save the exact (goal,target) pairs used for this run ─────────────
+    with open(
+        os.path.join(experiment_folder, "prompts.csv"),
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as f:
+        w = csv.writer(f)
+        w.writerow(["Run", "goal", "target"])
+        for i, (g, t) in enumerate(advbench_pairs, start=1):
+            w.writerow([i, g, t])
+    # -----------------------------------------------------------------------
 
     all_losses, all_best_losses, all_best_iters, all_best_strings = [], [], [], []
     (
@@ -209,9 +224,11 @@ def run_experiment(name, config_kwargs, advbench_pairs):
     write_csv(os.path.join(experiment_folder, "times.csv"), header, time_rows)
     logging.info("Saved aggregated times CSV")
 
+    # ---------- changed: pass real #prompts instead of constant ------------
     write_parameters_csv(
-        experiment_folder, config_kwargs, EXPERIMENT_SEED, name, NUM_PROMPTS
+        experiment_folder, config_kwargs, EXPERIMENT_SEED, name, len(advbench_pairs)
     )
+    # -----------------------------------------------------------------------
 
     with open(os.path.join(experiment_folder, "best_strings.txt"), "w") as f:
         for i, s in enumerate(all_best_strings, start=1):
@@ -319,7 +336,17 @@ if __name__ == "__main__":
         required=True,
         help="Choose 'gemma', 'llava', or 'llava-rc' (LLaVA with robust CLIP encoder)",
     )
+
+    p.add_argument("--goal", type=str, help="Custom goal prompt")
+    p.add_argument("--target", type=str, help="Custom target text (required if --goal)")
     args = p.parse_args()
+
+    if args.goal:
+        if not args.target:
+            raise ValueError("--target is required when --goal is provided")
+        adv_pairs = [(args.goal, args.target)]
+    else:
+        adv_pairs = advbench_pairs
 
     # parse numeric fractions
     def fraction_type(s):
@@ -356,7 +383,6 @@ if __name__ == "__main__":
         normalize = T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 
     elif args.model == "llava":
-        # LLaVA default uses 336×336 & CLIP‐ViT‐L mean/std
         transform = T.Compose(
             [
                 T.Lambda(lambda img: img.convert("RGB")),
@@ -371,7 +397,6 @@ if __name__ == "__main__":
         )
 
     else:  # llava-rc
-        # use the attached CLIPImageProcessor from experiments_utils
         clip_proc: CLIPImageProcessor = processor.image_processor
         h = clip_proc.size["height"]
         w = clip_proc.size["width"]
@@ -383,7 +408,6 @@ if __name__ == "__main__":
                 T.ToTensor(),
             ]
         )
-        # CLIPImageProcessor exposes its normalization stats
         normalize = T.Normalize(
             clip_proc.image_mean,
             clip_proc.image_std,
@@ -413,4 +437,4 @@ if __name__ == "__main__":
         "model": args.model,
     }
 
-    run_experiment(args.name, config_kwargs, advbench_pairs)
+    run_experiment(args.name, config_kwargs, adv_pairs)
