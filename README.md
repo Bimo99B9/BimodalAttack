@@ -26,18 +26,29 @@ You can configure these modes using the `--pgd_attack` and `--gcg_attack` flags.
 
 ## 📦 Installation
 
-This project uses a `conda` environment. To get started:
+We recommend using a Conda environment. Run the following:
 
-1. Create and activate the environment:
 ```bash
-conda env create -f environment.yml
-conda activate multimodal-attack
+# Create a new environment
+conda create -n bimodal_env python=3.9 -y
+conda activate bimodal_env
+
+# Install CUDA toolkit to get nvcc (required to compile flash-attn)
+conda install -y -c nvidia cuda-toolkit=12.8
+
+# Install all pip dependencies including PyTorch with CUDA 12.6
+pip install --upgrade pip
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu126
+
+# Make nvcc discoverable for flash-attn build
+export CUDA_HOME=$CONDA_PREFIX
+export PATH=$CUDA_HOME/bin:$PATH
+
+# Install FlashAttention2 separately (compiles locally)
+pip install flash-attn --no-cache-dir
 ```
 
-2. (Optional) If you're using LLaVA-based models, install `flash-attn` for faster attention:
-```bash
-pip install flash-attn --no-build-isolation
-```
+You should now have a fully working setup to run attacks with joint GCG+PGD.
 
 ---
 

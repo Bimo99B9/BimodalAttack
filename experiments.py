@@ -31,7 +31,7 @@ logging.basicConfig(
 
 EXPERIMENT_SEED = 1
 USE_ALL_PROMPTS = False
-NUM_PROMPTS = 20
+NUM_PROMPTS = 1
 ADV_BENCH_FILE = "data/advbench/harmful_behaviors.csv"
 
 os.makedirs("experiments", exist_ok=True)
