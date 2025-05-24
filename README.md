@@ -4,6 +4,16 @@ This repository implements joint multimodal adversarial attacks (GCG + PGD) on v
 
 ---
 
+## 📄 Full Paper
+
+Looking for the complete technical write‑up? You can read or download the full project report here:
+
+**[📑 Multimodal Adversarial Attacks for Vision–Language Models (PDF)](assets/report.pdf)**
+
+It contains all algorithms, experimental details, tables, and appendix material referenced throughout this repository.
+
+---
+
 ## 🚀 Attacks Supported
 
 We support the following attack modes:
