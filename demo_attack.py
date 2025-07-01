@@ -41,7 +41,8 @@ def model_id(name):
     return {
         "llava": "llava-hf/llava-1.5-7b-hf",
         "llava-rc": "llava-rc",
-        "gemma": "google/gemma-3-4b-it",
+        "gemma3": "google/gemma-3-4b-it",
+        "gemma3n": "google/gemma-3n-e4b-it",
     }[name.lower()]
 
 

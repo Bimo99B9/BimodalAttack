@@ -99,11 +99,13 @@ def main():
         MODEL_ID = "llava-hf/llava-1.5-7b-hf"
     elif model_param == "llava-rc":
         MODEL_ID = "llava-rc"
-    elif model_param == "gemma":
+    elif model_param == "gemma3":
         MODEL_ID = "google/gemma-3-4b-it"
+    elif model_param == "gemma3n":
+        MODEL_ID = "google/gemma-3n-e4b-it"
     else:
         raise ValueError(f"Unknown model in parameters.csv: {model_param}")
-
+    
     model, processor = load_model_and_processor(MODEL_ID)
 
     best_iters = compute_best_iterations(exp_dir, num_prompts)

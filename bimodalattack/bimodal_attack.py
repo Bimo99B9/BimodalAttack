@@ -311,27 +311,36 @@ class BimodalAttack:
         logger.info(f"Prompt after removing BOS token: {prompt}")
 
         if config.pgd_attack:
-            if self.processor.__class__.__name__ == "Gemma3Processor":
+            if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
                 # First, split the prompt on the optimization placeholder.
                 before_str, after_temp = prompt.split("{optim_str}", 1)
                 before_img_str = before_str.strip()
-                # Use partition to retain the <start_of_image> token in the result.
-                if "<start_of_image>" in after_temp:
-                    before_suffix, sep, after_str = after_temp.partition(
-                        "<start_of_image>"
-                    )
-                    # Combine the text before the token with the token itself.
+
+                # Define the correct single placeholder token based on the processor
+                if self.processor.__class__.__name__ == "Gemma3Processor":
+                    image_placeholder = "<image_token>"
+                elif self.processor.__class__.__name__ == "Gemma3nProcessor":
+                    image_placeholder = "<image_soft_token>"
+
+                # Use partition to find the placeholder and retain it in the result.
+                if image_placeholder in after_temp:
+                    before_suffix, sep, after_str = after_temp.partition(image_placeholder)
                     before_suffix_str = (before_suffix + sep).strip()
-                    after_str = (
-                        after_str.strip()
-                    )  # Keep any remaining tokens (like <end_of_turn>) intact.
+                    after_str = after_str.strip()
                 else:
-                    raise ValueError(
-                        "Expected <start_of_image> token in Gemma PGD prompt."
+                    logger.error(
+                        f"Expected '{image_placeholder}' token in Gemma PGD prompt. Segment after '{{optim_str}}':\n{after_temp}"
                     )
+                    logger.error(f"Full prompt: {prompt}")
+                    logger.error(f"Messages: {messages}")
+                    raise ValueError(
+                        f"Expected '{image_placeholder}' token in Gemma PGD prompt."
+                    )
+
             else:
-                if "<start_of_image>" in prompt:
-                    before_img_str, after_img_str = prompt.split("<start_of_image>", 1)
+                # Fallback for other models like Llava
+                if "<image_token>" in prompt:
+                    before_img_str, after_img_str = prompt.split("<image_token>", 1)
                 elif "<image>" in prompt:
                     before_img_str, after_img_str = prompt.split("<image>", 1)
                 else:
@@ -524,7 +533,7 @@ class BimodalAttack:
 
                 if config.pgd_attack:
                     pixel_values = self.normalize(image)
-                    if self.processor.__class__.__name__ == "Gemma3Processor":
+                    if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
                         image_features = model.get_image_features(
                             pixel_values=pixel_values
                         )
@@ -701,7 +710,7 @@ class BimodalAttack:
                 with torch.no_grad():
                     start_loss = time.perf_counter()
                     pixel_values = self.normalize(image)
-                    if self.processor.__class__.__name__ == "Gemma3Processor":
+                    if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
                         image_features = model.get_image_features(
                             pixel_values=pixel_values
                         )
@@ -746,7 +755,7 @@ class BimodalAttack:
                 with torch.no_grad():
                     if config.pgd_attack:
                         pixel_values = self.normalize(image)
-                        if self.processor.__class__.__name__ == "Gemma3Processor":
+                        if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
                             image_features = model.get_image_features(
                                 pixel_values=pixel_values
                             )
@@ -874,7 +883,7 @@ class BimodalAttack:
 
         if config.pgd_attack:
             pixel_values = self.normalize(image)
-            if self.processor.__class__.__name__ == "Gemma3Processor":
+            if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
                 image_features = model.get_image_features(pixel_values=pixel_values)
             else:
                 image_features = model.get_image_features(
@@ -969,7 +978,7 @@ class BimodalAttack:
 
         if self.config.pgd_attack:
             pixel_values = self.normalize(image)
-            if self.processor.__class__.__name__ == "Gemma3Processor":
+            if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
                 image_features = model.get_image_features(pixel_values=pixel_values)
             else:
                 image_features = model.get_image_features(
@@ -1151,7 +1160,7 @@ class BimodalAttack:
             assert single, "PGD mode only supports single=True"
             seq = (
                 ["before_img", "optim", "before_suffix", "image", "after", "target"]
-                if mt == "gemma3"
+                if mt in ("gemma3", "gemma3n")
                 else [
                     "before_img",
                     "image",
@@ -1166,7 +1175,7 @@ class BimodalAttack:
             if single:
                 seq = (
                     ["before_img", "optim", "before_suffix", "after", "target"]
-                    if mt == "gemma3"
+                    if mt in ("gemma3", "gemma3n")
                     else ["before_img", "before_suffix", "optim", "after", "target"]
                 )
             elif no_joint_eval:
@@ -1180,7 +1189,7 @@ class BimodalAttack:
             if single:
                 seq = (
                     ["before_img", "optim", "before_suffix", "image", "after", "target"]
-                    if mt == "gemma3"
+                    if mt in ("gemma3", "gemma3n")
                     else [
                         "before_img",
                         "image",
@@ -1193,14 +1202,14 @@ class BimodalAttack:
             elif no_target:
                 seq = (
                     ["before_img", "optim", "before_suffix", "image", "after"]
-                    if mt == "gemma3"
+                    if mt in ("gemma3", "gemma3n")
                     else ["before_img", "image", "before_suffix", "optim", "after"]
                 )
             else:
                 # full non-single
                 seq = (
                     ["before_img", "optim", "before_suffix", "image", "after", "target"]
-                    if mt == "gemma3"
+                    if mt in ("gemma3", "gemma3n")
                     else [
                         "before_img",
                         "image",
@@ -1308,6 +1317,78 @@ class BimodalAttack:
                 gc.collect()
                 torch.cuda.empty_cache()
         return torch.cat(all_loss, dim=0)
+    
+    # def _compute_candidates_loss_original(
+    #     self, search_batch_size: int, input_embeds: Tensor
+    # ) -> Tensor:
+    #     """
+    #     Computes the loss for candidate prompts using the negative margin loss.
+        
+    #     This updated implementation is based on the recommendations from the papers
+    #     "Adversarial Training Should be Cast as a Non-Zero-Sum Game" and "Improving SAM"
+    #     It replaces the surrogate cross-entropy loss with a loss that
+    #     directly maximizes the misclassification error, which is the objective of the
+    #     adversary in the proposed non-zero-sum / bilevel game.
+
+    #     The loss to be MINIMIZED by the optimizer is:
+    #     Loss = logit_of_correct_token - logit_of_best_incorrect_token
+
+    #     This is equivalent to MAXIMIZING the negative margin, which is the attacker's goal
+    #     """
+    #     all_loss = []
+    #     for i in range(0, input_embeds.shape[0], search_batch_size):
+    #         with torch.no_grad():
+    #             input_embeds_batch = input_embeds[i : i + search_batch_size]
+    #             current_batch_size = input_embeds_batch.shape[0]
+
+    #             outputs = self.model(inputs_embeds=input_embeds_batch)
+    #             logits = outputs.logits
+                
+    #             # Align logits and labels for next-token prediction loss
+    #             prompt_len = input_embeds.shape[1] - self.target_ids.shape[1]
+    #             shift_logits = logits[..., prompt_len - 1 : -1, :].contiguous()
+    #             shift_labels = self.target_ids.repeat(current_batch_size, 1)
+
+    #             # --- Early stopping check (must be done with original logits) ---
+    #             if self.config.early_stop:
+    #                 # Check if the target sequence is perfectly predicted
+    #                 if torch.any(
+    #                     torch.all(
+    #                         torch.argmax(shift_logits, dim=-1) == shift_labels, dim=-1
+    #                     )
+    #                 ).item():
+    #                     self.stop_flag = True
+
+    #             # --- BETA / Negative Margin Loss Calculation ---
+    #             # This implements the objective from Algorithm 1 (BETA) in the first paper
+    #             # and is the core idea of the BiSAM formulation in the second paper.
+                
+    #             # Get the logits of the correct target tokens (shape: [batch_size, seq_len])
+    #             correct_token_logits = torch.gather(
+    #                 shift_logits, -1, shift_labels.unsqueeze(-1)
+    #             ).squeeze(-1)
+
+    #             # To find the best incorrect logit, we set the correct logit to -inf
+    #             # We clone the logits tensor to avoid modifying it in-place before the early stopping check
+    #             temp_logits = shift_logits.clone()
+    #             temp_logits.scatter_(-1, shift_labels.unsqueeze(-1), float('-inf'))
+
+    #             # Get the max logit among all incorrect tokens
+    #             max_incorrect_token_logits = torch.max(temp_logits, dim=-1).values
+
+    #             # The loss is the negative of the margin, which the optimizer will minimize.
+    #             loss = correct_token_logits - max_incorrect_token_logits
+                
+    #             # Average the loss over the sequence dimension, similar to the original implementation
+    #             loss = loss.mean(dim=-1)
+    #             all_loss.append(loss)
+                
+    #             # Memory management
+    #             del outputs, logits, shift_logits, shift_labels, temp_logits, correct_token_logits, max_incorrect_token_logits
+    #             gc.collect()
+    #             torch.cuda.empty_cache()
+
+    #     return torch.cat(all_loss, dim=0)
 
     def _save_image(self, image, path):
         image = image.squeeze(0).detach().cpu().numpy()

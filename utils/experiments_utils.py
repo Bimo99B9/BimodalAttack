@@ -9,6 +9,7 @@ from transformers import (
     AutoProcessor,
     LlavaForConditionalGeneration,
     Gemma3ForConditionalGeneration,
+    Gemma3nForConditionalGeneration,
     CLIPVisionModel,
     CLIPImageProcessor,
 )
@@ -74,10 +75,20 @@ def write_parameters_csv(exp_folder, config_kwargs, seed, name, num_prompts):
 def load_model_and_processor(model_id):
     """
     Supports:
+      - google/gemma-3n-e4b-it
       - google/gemma-3-4b-it
       - llava-hf/llava-1.5-7b-hf
-      - llava-rc   ← LLaVA w/ RCLIP ViT‐L backbone
+      - llava-rc      ← LLaVA w/ RCLIP ViT‐L backbone
     """
+    # Gemma3n
+    if model_id == "google/gemma-3n-e4b-it":
+        m = Gemma3nForConditionalGeneration.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16, device_map="auto"
+        )
+        m.eval()
+        proc = AutoProcessor.from_pretrained(model_id)
+        return m, proc
+
     # Gemma
     if model_id == "google/gemma-3-4b-it":
         m = Gemma3ForConditionalGeneration.from_pretrained(

@@ -58,7 +58,6 @@ def run_experiment(name, config_kwargs, advbench_pairs):
     gc.collect()
     set_global_seed(EXPERIMENT_SEED)
 
-    # NEW -- save the exact (goal,target) pairs used for this run ─────────────
     with open(
         os.path.join(experiment_folder, "prompts.csv"),
         "w",
@@ -69,7 +68,6 @@ def run_experiment(name, config_kwargs, advbench_pairs):
         w.writerow(["Run", "goal", "target"])
         for i, (g, t) in enumerate(advbench_pairs, start=1):
             w.writerow([i, g, t])
-    # -----------------------------------------------------------------------
 
     all_losses, all_best_losses, all_best_iters, all_best_strings = [], [], [], []
     (
@@ -134,7 +132,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             logging.error(
                 f"Error during attack for prompt {idx}/{len(advbench_pairs)}: {goal} -> {target_text}"
             )
-            logging.error(f"Exception: {e}")
+            logging.error(f"Exception: {e}", exc_info=True)
 
         logging.info(
             f"Run {idx} (Seed={EXPERIMENT_SEED}) -> Loss={run_loss:.4f}, Time={run_time:.2f}s"
@@ -332,9 +330,9 @@ if __name__ == "__main__":
     )
     p.add_argument(
         "--model",
-        choices=["gemma", "llava", "llava-rc"],
+        choices=["gemma3", "gemma3n", "llava", "llava-rc"],
         required=True,
-        help="Choose 'gemma', 'llava', or 'llava-rc' (LLaVA with robust CLIP encoder)",
+        help="Choose 'gemma3', 'gemma3n', 'llava', or 'llava-rc'",
     )
 
     p.add_argument("--goal", type=str, help="Custom goal prompt")
@@ -359,19 +357,23 @@ if __name__ == "__main__":
     eps = fraction_type(args.eps)
 
     # pick HF model id
-    if args.model == "llava":
+    if args.model == "gemma3":
+        MODEL_ID = "google/gemma-3-4b-it"
+    elif args.model == "gemma3n":
+        MODEL_ID = "google/gemma-3n-e4b-it"
+    elif args.model == "llava":
         MODEL_ID = "llava-hf/llava-1.5-7b-hf"
     elif args.model == "llava-rc":
         MODEL_ID = "llava-rc"
     else:
-        MODEL_ID = "google/gemma-3-4b-it"
+        raise ValueError(f"Unknown model argument: {args.model}")
 
     # load
     model, processor = load_model_and_processor(MODEL_ID)
     tokenizer = processor.tokenizer
 
     # set up transforms & normalize
-    if args.model == "gemma":
+    if args.model == "gemma3":
         transform = T.Compose(
             [
                 T.Lambda(lambda img: img.convert("RGB")),
@@ -381,6 +383,18 @@ if __name__ == "__main__":
             ]
         )
         normalize = T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+
+    elif args.model == "gemma3n":
+        transform = T.Compose(
+            [
+                T.Lambda(lambda img: img.convert("RGB")),
+                T.Resize((768, 768), interpolation=T.InterpolationMode.BICUBIC),
+                T.CenterCrop((768, 768)),
+                T.ToTensor(),
+            ]
+        )
+        # Per the config, gemma3n only does rescale (handled by ToTensor), not normalization.
+        normalize = T.Lambda(lambda x: x)
 
     elif args.model == "llava":
         transform = T.Compose(
@@ -396,7 +410,7 @@ if __name__ == "__main__":
             [0.26862954, 0.26130258, 0.27577711],
         )
 
-    else:  # llava-rc
+    elif args.model == "llava-rc":
         clip_proc: CLIPImageProcessor = processor.image_processor
         h = clip_proc.size["height"]
         w = clip_proc.size["width"]
