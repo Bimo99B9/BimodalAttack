@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import time
+import json
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,15 +34,14 @@ EXPERIMENT_SEED = 1
 USE_ALL_PROMPTS = False
 NUM_PROMPTS = 1
 ADV_BENCH_FILE = "data/advbench/harmful_behaviors.csv"
+AGENT_BENCH_FILE = "data/agent_behaviors.csv"
 
 os.makedirs("experiments", exist_ok=True)
 
-# --------------------------------------------------------------------------- #
-# default AdvBench pairs (may be replaced by a custom one later)
-advbench_pairs = load_advbench_dataset(ADV_BENCH_FILE)
-if not USE_ALL_PROMPTS:
-    advbench_pairs = advbench_pairs[:NUM_PROMPTS]
-# --------------------------------------------------------------------------- #
+# This part is conditional on the user's setup, so it's kept as is.
+# advbench_pairs = load_advbench_dataset(ADV_BENCH_FILE)
+# if not USE_ALL_PROMPTS:
+#     advbench_pairs = advbench_pairs[:NUM_PROMPTS]
 
 
 def set_global_seed(seed):
@@ -51,7 +51,35 @@ def set_global_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def run_experiment(name, config_kwargs, advbench_pairs):
+def write_csv(path, header, rows):
+    """
+    Writes rows to a CSV file, handling multi-line strings by replacing newlines.
+    """
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for row in rows:
+            cleaned_row = []
+            for cell in row:
+                if isinstance(cell, str):
+                    # Replace newline characters to prevent malformed CSV rows
+                    cleaned_row.append(cell.replace("\n", " <NL> ").replace("\r", ""))
+                else:
+                    cleaned_row.append(cell)
+            writer.writerow(cleaned_row)
+
+
+def run_experiment(
+    name,
+    config_kwargs,
+    advbench_pairs,
+    attack_type,
+    model,
+    processor,
+    tokenizer,
+    image,
+    normalize,
+):
     experiment_folder = get_experiment_folder()
     logging.info(f"Experiment folder created: {experiment_folder}")
     torch.cuda.empty_cache()
@@ -93,7 +121,25 @@ def run_experiment(name, config_kwargs, advbench_pairs):
             images_folder=images_folder,
         )
         logging.info(f"--- Running prompt-target pair {idx}/{len(advbench_pairs)} ---")
-        messages = [{"role": "user", "content": goal}]
+
+        if attack_type == "agent":
+            logging.info(f"Loading agent messages from file: {goal}")
+            try:
+                with open(goal, "r", encoding="utf-8") as f:
+                    loaded_data = json.load(f)
+                if isinstance(loaded_data, dict) and "messages" in loaded_data:
+                    messages = loaded_data["messages"]
+                elif isinstance(loaded_data, list):
+                    messages = loaded_data
+                else:
+                    raise ValueError(
+                        "Invalid JSON format: must be a list of messages or a dict with a 'messages' key."
+                    )
+            except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError) as e:
+                logging.error(f"Could not load or parse messages file {goal}: {e}")
+                continue
+        else:
+            messages = [{"role": "user", "content": goal}]
 
         try:
             start_time = time.time()
@@ -128,19 +174,20 @@ def run_experiment(name, config_kwargs, advbench_pairs):
                 total_times=[],
             )
             run_time, run_loss, run_losses = 0, float("nan"), []
-
             logging.error(
-                f"Error during attack for prompt {idx}/{len(advbench_pairs)}: {goal} -> {target_text}"
+                f"Error during attack for prompt {idx}/{len(advbench_pairs)}: {e}",
+                exc_info=True,
             )
-            logging.error(f"Exception: {e}", exc_info=True)
 
         logging.info(
             f"Run {idx} (Seed={EXPERIMENT_SEED}) -> Loss={run_loss:.4f}, Time={run_time:.2f}s"
         )
 
-        all_losses.append(run_losses)
-        all_best_losses.append(run_loss)
-        all_best_iters.append(run_losses.index(min(run_losses)) if run_losses else -1)
+        all_losses.append(result.losses)
+        all_best_losses.append(result.best_loss)
+        all_best_iters.append(
+            result.losses.index(min(result.losses)) if result.losses else -1
+        )
         all_best_strings.append(result.best_string)
         all_gradient_times.append(result.gradient_times)
         all_sampling_times.append(result.sampling_times)
@@ -148,12 +195,6 @@ def run_experiment(name, config_kwargs, advbench_pairs):
         all_loss_times.append(result.loss_times)
         all_total_times.append(result.total_times)
         all_details.append((result.adversarial_suffixes, result.model_outputs))
-
-    def write_csv(path, header, rows):
-        with open(path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(rows)
 
     # losses.csv
     max_iters = max((len(l) for l in all_losses), default=0)
@@ -169,9 +210,9 @@ def run_experiment(name, config_kwargs, advbench_pairs):
     logging.info("Saved aggregated losses CSV")
 
     # details.csv
-    max_iters = max((len(d[0]) for d in all_details), default=0)
+    max_iters_detail = max((len(d[0]) for d in all_details if d and d[0]), default=0)
     detail_rows = []
-    for i in range(max_iters):
+    for i in range(max_iters_detail):
         row = [i]
         for adv, out in all_details:
             row += [adv[i] if i < len(adv) else "", out[i] if i < len(out) else ""]
@@ -184,9 +225,9 @@ def run_experiment(name, config_kwargs, advbench_pairs):
     logging.info("Saved aggregated details CSV")
 
     # times.csv
-    max_iters = max((len(t) for t in all_total_times), default=0)
+    max_iters_time = max((len(t) for t in all_total_times), default=0)
     time_rows = []
-    for i in range(max_iters):
+    for i in range(max_iters_time):
         row = [i]
         for gt, st, pt, lt, tt in zip(
             all_gradient_times,
@@ -203,7 +244,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
                 (tt[i] if i < len(tt) else ""),
             ]
         time_rows.append(row)
-    header = ["Iteration"] + sum(
+    header_time = ["Iteration"] + sum(
         [
             [
                 f"Run {i+1} {t}"
@@ -219,27 +260,35 @@ def run_experiment(name, config_kwargs, advbench_pairs):
         ],
         [],
     )
-    write_csv(os.path.join(experiment_folder, "times.csv"), header, time_rows)
+    write_csv(os.path.join(experiment_folder, "times.csv"), header_time, time_rows)
     logging.info("Saved aggregated times CSV")
 
-    # ---------- changed: pass real #prompts instead of constant ------------
     write_parameters_csv(
-        experiment_folder, config_kwargs, EXPERIMENT_SEED, name, len(advbench_pairs)
+        experiment_folder,
+        config_kwargs,
+        EXPERIMENT_SEED,
+        name,
+        len(advbench_pairs),
+        attack_type,
     )
-    # -----------------------------------------------------------------------
 
-    with open(os.path.join(experiment_folder, "best_strings.txt"), "w") as f:
+    with open(
+        os.path.join(experiment_folder, "best_strings.txt"), "w", encoding="utf-8"
+    ) as f:
         for i, s in enumerate(all_best_strings, start=1):
             f.write(f"Run {i}: {s}\n")
     logging.info("Saved best strings")
 
-    avg_best = np.mean(all_best_losses) if all_best_losses else float("nan")
-    std_best = np.std(all_best_losses) if all_best_losses else float("nan")
+    avg_best = np.nanmean([loss for loss in all_best_losses])
+    std_best = np.nanstd([loss for loss in all_best_losses])
     summary = [["Average Best Loss", avg_best], ["Std Best Loss", std_best]]
 
     def comp(tlists):
         means = [np.mean(t) if t else float("nan") for t in tlists]
-        return np.mean(means), np.std(means)
+        valid_means = [m for m in means if not np.isnan(m)]
+        return np.mean(valid_means) if valid_means else float("nan"), (
+            np.std(valid_means) if valid_means else float("nan")
+        )
 
     for label, times in zip(
         ["Gradient", "Sampling", "PGD", "Loss", "Total"],
@@ -253,6 +302,7 @@ def run_experiment(name, config_kwargs, advbench_pairs):
     ):
         avg, std = comp(times)
         summary += [[f"Average {label} Time", avg], [f"Std {label} Time", std]]
+
     write_csv(
         os.path.join(experiment_folder, "summary.csv"), ["Metric", "Value"], summary
     )
@@ -260,7 +310,8 @@ def run_experiment(name, config_kwargs, advbench_pairs):
 
     plt.figure(figsize=(10, 6), dpi=200)
     for i, losses in enumerate(all_losses, start=1):
-        plt.plot(losses, linestyle="-", linewidth=1, label=f"Run {i}")
+        if losses:
+            plt.plot(losses, linestyle="-", linewidth=1, label=f"Run {i}")
     plt.xlabel("Iteration")
     plt.ylabel("Loss")
     plt.title(name)
@@ -306,128 +357,75 @@ if __name__ == "__main__":
     p.add_argument("--name", required=True)
     p.add_argument("--num_steps", type=int, required=True)
     p.add_argument("--search_width", type=int, required=True)
-    p.add_argument(
-        "--dynamic_search",
-        type=lambda x: x.lower() in ("y", "yes", "true"),
-        required=True,
-    )
+    p.add_argument("--dynamic_search", type=str2bool, required=True)
     p.add_argument("--min_search_width", type=int, required=True)
-    p.add_argument(
-        "--pgd_attack", type=lambda x: x.lower() in ("y", "yes", "true"), required=True
-    )
-    p.add_argument(
-        "--gcg_attack", type=lambda x: x.lower() in ("y", "yes", "true"), required=True
-    )
+    p.add_argument("--pgd_attack", type=str2bool, required=True)
+    p.add_argument("--gcg_attack", type=str2bool, required=True)
     p.add_argument("--alpha", type=str, required=True)
     p.add_argument("--eps", type=str, required=True)
+    p.add_argument("--debug_output", type=str2bool, required=True)
+    p.add_argument("--joint_eval", type=str2bool, required=True)
     p.add_argument(
-        "--debug_output",
-        type=lambda x: x.lower() in ("y", "yes", "true"),
-        required=True,
+        "--model", choices=["gemma3", "gemma3n", "llava", "llava-rc"], required=True
     )
-    p.add_argument(
-        "--joint_eval", type=lambda x: x.lower() in ("y", "yes", "true"), required=True
-    )
-    p.add_argument(
-        "--model",
-        choices=["gemma3", "gemma3n", "llava", "llava-rc"],
-        required=True,
-        help="Choose 'gemma3', 'gemma3n', 'llava', or 'llava-rc'",
-    )
-
-    p.add_argument("--goal", type=str, help="Custom goal prompt")
+    p.add_argument("--attack_type", choices=["advbench", "agent"], default="advbench")
+    p.add_argument("--goal", type=str, help="Custom goal or path to messages file")
     p.add_argument("--target", type=str, help="Custom target text (required if --goal)")
     args = p.parse_args()
 
-    if args.goal:
+    if args.attack_type == "agent":
+        adv_pairs = load_advbench_dataset(AGENT_BENCH_FILE)
+    elif args.goal:
         if not args.target:
             raise ValueError("--target is required when --goal is provided")
         adv_pairs = [(args.goal, args.target)]
     else:
-        adv_pairs = advbench_pairs
-
-    # parse numeric fractions
-    def fraction_type(s):
-        if "/" in s:
-            n, d = s.split("/")
-            return float(n) / float(d)
-        return float(s)
+        adv_pairs = load_advbench_dataset(ADV_BENCH_FILE)
 
     alpha = fraction_type(args.alpha)
     eps = fraction_type(args.eps)
 
-    # pick HF model id
-    if args.model == "gemma3":
-        MODEL_ID = "google/gemma-3-4b-it"
-    elif args.model == "gemma3n":
-        MODEL_ID = "google/gemma-3n-e4b-it"
-    elif args.model == "llava":
-        MODEL_ID = "llava-hf/llava-1.5-7b-hf"
-    elif args.model == "llava-rc":
-        MODEL_ID = "llava-rc"
-    else:
+    model_map = {
+        "gemma3": "google/gemma-3-4b-it",
+        "gemma3n": "google/gemma-3n-e2b-it",
+        "llava": "llava-hf/llava-1.5-7b-hf",
+        "llava-rc": "llava-rc",
+    }
+    MODEL_ID = model_map.get(args.model)
+    if not MODEL_ID:
         raise ValueError(f"Unknown model argument: {args.model}")
 
-    # load
     model, processor = load_model_and_processor(MODEL_ID)
     tokenizer = processor.tokenizer
 
-    # set up transforms & normalize
-    if args.model == "gemma3":
-        transform = T.Compose(
-            [
-                T.Lambda(lambda img: img.convert("RGB")),
-                T.Resize((896, 896), interpolation=T.InterpolationMode.BICUBIC),
-                T.CenterCrop((896, 896)),
-                T.ToTensor(),
-            ]
-        )
-        normalize = T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-
-    elif args.model == "gemma3n":
-        transform = T.Compose(
-            [
-                T.Lambda(lambda img: img.convert("RGB")),
-                T.Resize((768, 768), interpolation=T.InterpolationMode.BICUBIC),
-                T.CenterCrop((768, 768)),
-                T.ToTensor(),
-            ]
-        )
-        # Per the config, gemma3n only does rescale (handled by ToTensor), not normalization.
-        normalize = T.Lambda(lambda x: x)
-
-    elif args.model == "llava":
-        transform = T.Compose(
-            [
-                T.Lambda(lambda img: img.convert("RGB")),
-                T.Resize(336, interpolation=T.InterpolationMode.BICUBIC),
-                T.CenterCrop((336, 336)),
-                T.ToTensor(),
-            ]
-        )
+    normalize = None
+    if "llava" in args.model:
         normalize = T.Normalize(
-            [0.48145466, 0.4578275, 0.40821073],
-            [0.26862954, 0.26130258, 0.27577711],
+            mean=processor.image_processor.image_mean,
+            std=processor.image_processor.image_std,
         )
-
-    elif args.model == "llava-rc":
-        clip_proc: CLIPImageProcessor = processor.image_processor
-        h = clip_proc.size["height"]
-        w = clip_proc.size["width"]
+        crop_size = processor.image_processor.crop_size
         transform = T.Compose(
             [
                 T.Lambda(lambda img: img.convert("RGB")),
-                T.Resize((h, w), interpolation=T.InterpolationMode.BICUBIC),
-                T.CenterCrop((h, w)),
+                T.Resize(
+                    crop_size["height"], interpolation=T.InterpolationMode.BICUBIC
+                ),
+                T.CenterCrop((crop_size["height"], crop_size["width"])),
                 T.ToTensor(),
             ]
         )
-        normalize = T.Normalize(
-            clip_proc.image_mean,
-            clip_proc.image_std,
+    else:  # Gemma models
+        normalize = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        transform = T.Compose(
+            [
+                T.Lambda(lambda img: img.convert("RGB")),
+                T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
+                T.CenterCrop(224),
+                T.ToTensor(),
+            ]
         )
 
-    # load one test image for the attack pipeline
     raw = Image.open(
         requests.get(
             "http://images.cocodataset.org/val2017/000000039769.jpg", stream=True
@@ -451,4 +449,14 @@ if __name__ == "__main__":
         "model": args.model,
     }
 
-    run_experiment(args.name, config_kwargs, adv_pairs)
+    run_experiment(
+        args.name,
+        config_kwargs,
+        adv_pairs,
+        args.attack_type,
+        model,
+        processor,
+        tokenizer,
+        image,
+        normalize,
+    )

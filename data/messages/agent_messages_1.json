@@ -1,0 +1,20 @@
+[
+    {
+        "role": "system",
+        "content": [
+            {
+                "type": "text",
+                "text": "You are an agent which follow my instruction and perform desktop computer tasks as instructed. You are asked to complete the following task: Merge the contents of all .txt files from your vscode project into a single document \"concat.docx\" on Desktop with libreoffice writer. No merging separator is needed. Ensure to set the overall font size of the document to 10."
+            }
+        ]
+    },
+    {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "Given the screenshot, what's the next step that you will do to help with the task?"
+            }
+        ]
+    }
+]

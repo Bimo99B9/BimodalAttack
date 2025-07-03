@@ -13,7 +13,11 @@ import transformers
 from torch import Tensor
 from transformers import set_seed
 
-from bimodalattack.utils import INIT_CHARS, find_executable_batch_size, get_nonascii_toks
+from bimodalattack.utils import (
+    INIT_CHARS,
+    find_executable_batch_size,
+    get_nonascii_toks,
+)
 
 from PIL import Image
 import torchvision.transforms.functional as F
@@ -274,18 +278,35 @@ class BimodalAttack:
             messages = copy.deepcopy(messages)
         logger.info(f"Messages 0: {messages}")
 
-        if isinstance(messages, str):
-            messages = [{"role": "user", "content": messages}]
-        else:
-            messages = copy.deepcopy(messages)
-            logger.info(f"Messages 1: {messages}")
+        # Find the last message from a user to append the optimization string
+        last_user_idx = -1
+        for i, msg in reversed(list(enumerate(messages))):
+            if msg.get("role") == "user":
+                last_user_idx = i
+                break
 
-        if (
-            isinstance(messages[-1]["content"], str)
-            and "{optim_str}" not in messages[-1]["content"]
-        ):
-            messages[-1]["content"] = messages[-1]["content"] + " {optim_str}"
-            logger.info(f"Messages 2: {messages}")
+        if last_user_idx != -1:
+            content = messages[last_user_idx].get("content", "")
+
+            # Handle multimodal content (list of dicts)
+            if isinstance(content, list):
+                text_part = next((p for p in content if p.get("type") == "text"), None)
+                if text_part:
+                    if "{optim_str}" not in text_part.get("text", ""):
+                        text_part["text"] += " {optim_str}"
+                else:
+                    # If no text part exists, add one
+                    content.append({"type": "text", "text": "{optim_str}"})
+                messages[last_user_idx]["content"] = content
+                logger.info(f"Messages 2 (list content): {messages}")
+
+            # Handle simple string content
+            elif isinstance(content, str):
+                if "{optim_str}" not in content:
+                    messages[last_user_idx]["content"] += " {optim_str}"
+                    logger.info(f"Messages 2 (str content): {messages}")
+        else:
+            logger.warning("No user message found to append optimization string.")
 
         if config.pgd_attack:
             if isinstance(messages[-1]["content"], str):
@@ -311,7 +332,10 @@ class BimodalAttack:
         logger.info(f"Prompt after removing BOS token: {prompt}")
 
         if config.pgd_attack:
-            if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
+            if self.processor.__class__.__name__ in (
+                "Gemma3Processor",
+                "Gemma3nProcessor",
+            ):
                 # First, split the prompt on the optimization placeholder.
                 before_str, after_temp = prompt.split("{optim_str}", 1)
                 before_img_str = before_str.strip()
@@ -324,7 +348,9 @@ class BimodalAttack:
 
                 # Use partition to find the placeholder and retain it in the result.
                 if image_placeholder in after_temp:
-                    before_suffix, sep, after_str = after_temp.partition(image_placeholder)
+                    before_suffix, sep, after_str = after_temp.partition(
+                        image_placeholder
+                    )
                     before_suffix_str = (before_suffix + sep).strip()
                     after_str = after_str.strip()
                 else:
@@ -365,7 +391,7 @@ class BimodalAttack:
                 target, add_special_tokens=False, return_tensors="pt"
             )["input_ids"].to(model.device, torch.int64)
         else:
-            before_str, after_str = prompt.split("{optim_str}")
+            before_str, after_str = prompt.split("{optim_str}", 1)
             logger.info(f"Before str: {before_str}")
             logger.info(f"After str: {after_str}")
             logger.info(f"Target: {target}")
@@ -533,7 +559,10 @@ class BimodalAttack:
 
                 if config.pgd_attack:
                     pixel_values = self.normalize(image)
-                    if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
+                    if self.processor.__class__.__name__ in (
+                        "Gemma3Processor",
+                        "Gemma3nProcessor",
+                    ):
                         image_features = model.get_image_features(
                             pixel_values=pixel_values
                         )
@@ -710,7 +739,10 @@ class BimodalAttack:
                 with torch.no_grad():
                     start_loss = time.perf_counter()
                     pixel_values = self.normalize(image)
-                    if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
+                    if self.processor.__class__.__name__ in (
+                        "Gemma3Processor",
+                        "Gemma3nProcessor",
+                    ):
                         image_features = model.get_image_features(
                             pixel_values=pixel_values
                         )
@@ -755,7 +787,10 @@ class BimodalAttack:
                 with torch.no_grad():
                     if config.pgd_attack:
                         pixel_values = self.normalize(image)
-                        if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
+                        if self.processor.__class__.__name__ in (
+                            "Gemma3Processor",
+                            "Gemma3nProcessor",
+                        ):
                             image_features = model.get_image_features(
                                 pixel_values=pixel_values
                             )
@@ -883,7 +918,10 @@ class BimodalAttack:
 
         if config.pgd_attack:
             pixel_values = self.normalize(image)
-            if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
+            if self.processor.__class__.__name__ in (
+                "Gemma3Processor",
+                "Gemma3nProcessor",
+            ):
                 image_features = model.get_image_features(pixel_values=pixel_values)
             else:
                 image_features = model.get_image_features(
@@ -978,7 +1016,10 @@ class BimodalAttack:
 
         if self.config.pgd_attack:
             pixel_values = self.normalize(image)
-            if self.processor.__class__.__name__ in ("Gemma3Processor", "Gemma3nProcessor"):
+            if self.processor.__class__.__name__ in (
+                "Gemma3Processor",
+                "Gemma3nProcessor",
+            ):
                 image_features = model.get_image_features(pixel_values=pixel_values)
             else:
                 image_features = model.get_image_features(
@@ -1317,13 +1358,13 @@ class BimodalAttack:
                 gc.collect()
                 torch.cuda.empty_cache()
         return torch.cat(all_loss, dim=0)
-    
+
     # def _compute_candidates_loss_original(
     #     self, search_batch_size: int, input_embeds: Tensor
     # ) -> Tensor:
     #     """
     #     Computes the loss for candidate prompts using the negative margin loss.
-        
+
     #     This updated implementation is based on the recommendations from the papers
     #     "Adversarial Training Should be Cast as a Non-Zero-Sum Game" and "Improving SAM"
     #     It replaces the surrogate cross-entropy loss with a loss that
@@ -1343,7 +1384,7 @@ class BimodalAttack:
 
     #             outputs = self.model(inputs_embeds=input_embeds_batch)
     #             logits = outputs.logits
-                
+
     #             # Align logits and labels for next-token prediction loss
     #             prompt_len = input_embeds.shape[1] - self.target_ids.shape[1]
     #             shift_logits = logits[..., prompt_len - 1 : -1, :].contiguous()
@@ -1362,7 +1403,7 @@ class BimodalAttack:
     #             # --- BETA / Negative Margin Loss Calculation ---
     #             # This implements the objective from Algorithm 1 (BETA) in the first paper
     #             # and is the core idea of the BiSAM formulation in the second paper.
-                
+
     #             # Get the logits of the correct target tokens (shape: [batch_size, seq_len])
     #             correct_token_logits = torch.gather(
     #                 shift_logits, -1, shift_labels.unsqueeze(-1)
@@ -1378,11 +1419,11 @@ class BimodalAttack:
 
     #             # The loss is the negative of the margin, which the optimizer will minimize.
     #             loss = correct_token_logits - max_incorrect_token_logits
-                
+
     #             # Average the loss over the sequence dimension, similar to the original implementation
     #             loss = loss.mean(dim=-1)
     #             all_loss.append(loss)
-                
+
     #             # Memory management
     #             del outputs, logits, shift_logits, shift_labels, temp_logits, correct_token_logits, max_incorrect_token_logits
     #             gc.collect()

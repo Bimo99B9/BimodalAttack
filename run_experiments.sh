@@ -114,17 +114,51 @@ set -e
 #     --model "gemma3n" \
 #     > logs/experiments_gemma3n_gcg_max.out 2>&1
 
-CUDA_VISIBLE_DEVICES=6 python experiments.py \
-    --name "Gemma3n - PGD" \
+# CUDA_VISIBLE_DEVICES=6 python experiments.py \
+#     --name "Gemma3n - PGD" \
+#     --num_steps 600 \
+#     --search_width 512 \
+#     --dynamic_search False \
+#     --min_search_width 512 \
+#     --pgd_attack True \
+#     --gcg_attack False \
+#     --alpha "4/255" \
+#     --eps "64/255" \
+#     --debug_output False \
+#     --joint_eval False \
+#     --model "gemma3n" \
+    > logs/experiments_gemma3n_pgd.out 2>&1
+
+### Agents
+
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
+#     --name "Agent Attack - Cats Image" \
+#     --attack_type agent \
+#     --model "gemma3n" \
+#     --num_steps 600 \
+#     --search_width 256 \
+#     --dynamic_search True \
+#     --min_search_width 64 \
+#     --pgd_attack True \
+#     --gcg_attack True \
+#     --alpha "4/255" \
+#     --eps "64/255" \
+#     --debug_output False \
+#     --joint_eval True \
+#     > logs/experiments_agents_gemma3n.out 2>&1
+
+CUDA_VISIBLE_DEVICES=5 python experiments.py \
+    --name "Agent Attack 2 - Cats Image" \
+    --attack_type agent \
+    --model "llava" \
     --num_steps 600 \
-    --search_width 512 \
-    --dynamic_search False \
-    --min_search_width 512 \
+    --search_width 256 \
+    --dynamic_search True \
+    --min_search_width 64 \
     --pgd_attack True \
-    --gcg_attack False \
+    --gcg_attack True \
     --alpha "4/255" \
     --eps "64/255" \
     --debug_output False \
-    --joint_eval False \
-    --model "gemma3n" \
-    > logs/experiments_gemma3n_pgd.out 2>&1
+    --joint_eval True \
+    > logs/experiments_agents_llava.out 2>&1
