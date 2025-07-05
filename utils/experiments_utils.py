@@ -100,6 +100,7 @@ def load_model_and_processor(model_id):
             model_id, torch_dtype=torch.bfloat16, device_map="auto"
         )
         processor = AutoProcessor.from_pretrained(model_id)
+        logging.info(f"Loaded Gemma3n model with processor: {processor.__class__.__name__}")
 
     # Gemma3
     elif model_id == "google/gemma-3-4b-it":

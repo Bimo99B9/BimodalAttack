@@ -439,7 +439,7 @@ if __name__ == "__main__":
     # ).convert("RGB")
     # image = transform(raw).unsqueeze(0).to(model.device)
     
-    raw = Image.open("assets/base_libreoffice.png").convert("RGB")
+    raw = Image.open("assets/original_image.jpg").convert("RGB")
     image = transform(raw).unsqueeze(0).to(model.device)
 
     config_kwargs = {
