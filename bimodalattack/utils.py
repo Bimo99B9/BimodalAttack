@@ -7,12 +7,33 @@ from torch import Tensor
 from transformers import PreTrainedTokenizerBase
 import numpy as np
 from PIL import Image
+from typing import Optional
 
 INIT_CHARS = [
-    ".", ",", "!", "?", ";", ":", "(", ")", "[", "]", "{", "}",
-    "@", "#", "$", "%", "&", "*",
-    "w", "x", "y", "z",
+    ".",
+    ",",
+    "!",
+    "?",
+    ";",
+    ":",
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    "@",
+    "#",
+    "$",
+    "%",
+    "&",
+    "*",
+    "w",
+    "x",
+    "y",
+    "z",
 ]
+
 
 def get_nonascii_toks(tokenizer, device="cpu"):
 
@@ -23,7 +44,7 @@ def get_nonascii_toks(tokenizer, device="cpu"):
     for i in range(tokenizer.vocab_size):
         if not is_ascii(tokenizer.decode([i])):
             nonascii_toks.append(i)
-    
+
     if tokenizer.bos_token_id is not None:
         nonascii_toks.append(tokenizer.bos_token_id)
     if tokenizer.eos_token_id is not None:
@@ -32,11 +53,20 @@ def get_nonascii_toks(tokenizer, device="cpu"):
         nonascii_toks.append(tokenizer.pad_token_id)
     if tokenizer.unk_token_id is not None:
         nonascii_toks.append(tokenizer.unk_token_id)
-    
+
     return torch.tensor(nonascii_toks, device=device)
 
+
 def mellowmax(t: Tensor, alpha=1.0, dim=-1):
-    return 1.0 / alpha * (torch.logsumexp(alpha * t, dim=dim) - torch.log(torch.tensor(t.shape[-1], dtype=t.dtype, device=t.device)))
+    return (
+        1.0
+        / alpha
+        * (
+            torch.logsumexp(alpha * t, dim=dim)
+            - torch.log(torch.tensor(t.shape[-1], dtype=t.dtype, device=t.device))
+        )
+    )
+
 
 # borrowed from https://github.com/huggingface/accelerate/blob/85a75d4c3d0deffde2fc8b917d9b1ae1cb580eb2/src/accelerate/utils/memory.py#L69
 def should_reduce_batch_size(exception: Exception) -> bool:
@@ -56,8 +86,11 @@ def should_reduce_batch_size(exception: Exception) -> bool:
         return any(err in exception.args[0] for err in _statements)
     return False
 
+
 # modified from https://github.com/huggingface/accelerate/blob/85a75d4c3d0deffde2fc8b917d9b1ae1cb580eb2/src/accelerate/utils/memory.py#L87
-def find_executable_batch_size(function: callable = None, starting_batch_size: int = 128):
+def find_executable_batch_size(
+    function: callable = None, starting_batch_size: int = 128
+):
     """
     A basic decorator that will try to execute `function`. If it fails from exceptions related to out-of-memory or
     CUDNN, the batch size is cut in half and passed to `function`
@@ -85,7 +118,9 @@ def find_executable_batch_size(function: callable = None, starting_batch_size: i
     ```
     """
     if function is None:
-        return functools.partial(find_executable_batch_size, starting_batch_size=starting_batch_size)
+        return functools.partial(
+            find_executable_batch_size, starting_batch_size=starting_batch_size
+        )
 
     batch_size = starting_batch_size
 
@@ -96,7 +131,9 @@ def find_executable_batch_size(function: callable = None, starting_batch_size: i
         params = list(inspect.signature(function).parameters.keys())
         # Guard against user error
         if len(params) < (len(args) + 1):
-            arg_str = ", ".join([f"{arg}={value}" for arg, value in zip(params[1:], args[1:])])
+            arg_str = ", ".join(
+                [f"{arg}={value}" for arg, value in zip(params[1:], args[1:])]
+            )
             raise TypeError(
                 f"Batch size was passed into `{function.__name__}` as the first argument when called."
                 f"Remove this as the decorator already does so: `{function.__name__}({arg_str})`"
@@ -117,6 +154,7 @@ def find_executable_batch_size(function: callable = None, starting_batch_size: i
 
     return decorator
 
+
 def configure_pad_token(tokenizer: PreTrainedTokenizerBase) -> PreTrainedTokenizerBase:
     """Checks if the (Hugging Face) tokenizer has a padding token and sets it if not present.
 
@@ -133,40 +171,65 @@ def configure_pad_token(tokenizer: PreTrainedTokenizerBase) -> PreTrainedTokeniz
         tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
     return tokenizer
 
+
 def sample_ids_from_grad(
     ids: Tensor,
     grad: Tensor,
     search_width: int,
-    topk: int = 256,
+    topk: int,
     n_replace: int = 1,
-    not_allowed_ids: Tensor = False,
-):
+    not_allowed_ids: Optional[Tensor] = None,
+) -> Tensor:
     """
-    Returns search_width combinations of token ids based on the token gradient.
+    Samples a batch of new token ids from the gradient.
     """
-    n_optim_tokens = len(ids)
-    original_ids = ids.repeat(search_width, 1)
+    grad = grad.cpu()
+    ids = ids.cpu()
+
+    # === FIX: Sanitize the gradient tensor to prevent invalid indices ===
+    # Replace any NaN or Inf values with a large negative number
+    if torch.isnan(grad).any() or torch.isinf(grad).any():
+        print("Warning: NaN or Inf found in gradient tensor. Sanitizing.")
+        grad = torch.nan_to_num(grad, nan=-torch.inf, posinf=-torch.inf, neginf=-torch.inf)
+    # =================================================================
+
+    L, V = grad.shape
+    scores = torch.gather(grad, 1, ids.unsqueeze(1)).squeeze(1)
+    top_indices = torch.topk(grad, topk, dim=-1).indices
+    top_scores = torch.gather(grad, 1, top_indices)
+    new_ids = top_indices.flatten()
+    new_scores = (top_scores - scores.unsqueeze(1)).flatten()
 
     if not_allowed_ids is not None:
-        grad[:, not_allowed_ids.to(grad.device)] = float("inf")
+        # filter out not allowed ids
+        # --- FIX STARTS HERE ---
+        # Ensure both tensors are on the same device (CPU) before comparison
+        mask = torch.isin(new_ids, not_allowed_ids.to(new_ids.device))
+        # --- FIX ENDS HERE ---
+        new_ids = new_ids[~mask]
+        new_scores = new_scores[~mask]
 
-    topk_ids = (-grad).topk(topk, dim=1).indices
+    # Sample without replacement
+    # TODO: this can be slow
+    sampled_indices = torch.multinomial(
+        torch.softmax(new_scores, dim=0),
+        min(search_width, new_scores.shape[0]),
+        replacement=False,
+    )
+    # (search_width, L)
+    sampled_ids = torch.zeros(
+        (sampled_indices.shape[0], L), dtype=torch.long
+    )
+    for i in range(sampled_indices.shape[0]):
+        # The index of the token to replace
+        idx_to_replace = sampled_indices[i] // topk
+        # The new token id
+        new_id = new_ids[sampled_indices[i]]
+        new_ids_i = ids.clone()
+        new_ids_i[idx_to_replace] = new_id
+        sampled_ids[i] = new_ids_i
 
-    # Randomly choose positions to replace (n_replace per candidate)
-    sampled_ids_pos = torch.argsort(
-        torch.rand((search_width, n_optim_tokens), device=grad.device)
-    )[
-        ..., :n_replace
-    ]  # shape: (search_width, n_replace)
-
-    sampled_ids_val = torch.gather(
-        topk_ids[sampled_ids_pos],
-        2,
-        torch.randint(0, topk, (search_width, n_replace, 1), device=grad.device),
-    ).squeeze(2)
-
-    new_ids = original_ids.scatter_(1, sampled_ids_pos, sampled_ids_val)
-    return new_ids
+    return sampled_ids.to(ids.device)
 
 
 def filter_ids(ids: Tensor, tokenizer: transformers.PreTrainedTokenizer):
@@ -190,6 +253,7 @@ def filter_ids(ids: Tensor, tokenizer: transformers.PreTrainedTokenizer):
         )
 
     return torch.stack(filtered_ids)
+
 
 def save_image(image, path):
     image = image.squeeze(0).detach().cpu().numpy()

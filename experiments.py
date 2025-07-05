@@ -12,12 +12,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import requests
 import torch
-import torchvision.transforms as T
 from PIL import Image
 
 from bimodalattack import BimodalAttackConfig
 import bimodalattack
-from transformers import CLIPImageProcessor
 from utils.experiments_utils import (
     load_advbench_dataset,
     get_experiment_folder,
@@ -78,7 +76,6 @@ def run_experiment(
     processor,
     tokenizer,
     image,
-    normalize,
 ):
     experiment_folder = get_experiment_folder()
     logging.info(f"Experiment folder created: {experiment_folder}")
@@ -151,8 +148,7 @@ def run_experiment(
                 goal,
                 target_text,
                 image,
-                config,
-                normalize=normalize,
+                config
             )
             run_time = time.time() - start_time
             run_loss = result.best_loss
@@ -404,34 +400,6 @@ if __name__ == "__main__":
     model, processor = load_model_and_processor(MODEL_ID)
     tokenizer = processor.tokenizer
 
-    normalize = None
-    if "llava" in args.model:
-        normalize = T.Normalize(
-            mean=processor.image_processor.image_mean,
-            std=processor.image_processor.image_std,
-        )
-        crop_size = processor.image_processor.crop_size
-        transform = T.Compose(
-            [
-                T.Lambda(lambda img: img.convert("RGB")),
-                T.Resize(
-                    crop_size["height"], interpolation=T.InterpolationMode.BICUBIC
-                ),
-                T.CenterCrop((crop_size["height"], crop_size["width"])),
-                T.ToTensor(),
-            ]
-        )
-    else:  # Gemma models
-        normalize = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        transform = T.Compose(
-            [
-                T.Lambda(lambda img: img.convert("RGB")),
-                T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
-                T.CenterCrop(224),
-                T.ToTensor(),
-            ]
-        )
-
     # raw = Image.open(
     #     requests.get(
     #         "https://de.libreoffice.org/assets/Uploads/Discover/Screenshots/Screenshot-01-New-DE.png", stream=True
@@ -439,8 +407,7 @@ if __name__ == "__main__":
     # ).convert("RGB")
     # image = transform(raw).unsqueeze(0).to(model.device)
     
-    raw = Image.open("assets/original_image.jpg").convert("RGB")
-    image = transform(raw).unsqueeze(0).to(model.device)
+    image = Image.open("assets/original_image.jpg").convert("RGB")
 
     config_kwargs = {
         "num_steps": args.num_steps,
@@ -468,5 +435,4 @@ if __name__ == "__main__":
         processor,
         tokenizer,
         image,
-        normalize,
     )
