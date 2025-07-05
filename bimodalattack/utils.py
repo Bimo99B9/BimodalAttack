@@ -2,8 +2,11 @@ import functools
 import gc
 import inspect
 import torch
+import transformers
 from torch import Tensor
 from transformers import PreTrainedTokenizerBase
+import numpy as np
+from PIL import Image
 
 INIT_CHARS = [
     ".", ",", "!", "?", ";", ":", "(", ")", "[", "]", "{", "}",
@@ -33,7 +36,7 @@ def get_nonascii_toks(tokenizer, device="cpu"):
     return torch.tensor(nonascii_toks, device=device)
 
 def mellowmax(t: Tensor, alpha=1.0, dim=-1):
-   return 1.0 / alpha * (torch.logsumexp(alpha * t, dim=dim) - torch.log(torch.tensor(t.shape[-1], dtype=t.dtype, device=t.device)))
+    return 1.0 / alpha * (torch.logsumexp(alpha * t, dim=dim) - torch.log(torch.tensor(t.shape[-1], dtype=t.dtype, device=t.device)))
 
 # borrowed from https://github.com/huggingface/accelerate/blob/85a75d4c3d0deffde2fc8b917d9b1ae1cb580eb2/src/accelerate/utils/memory.py#L69
 def should_reduce_batch_size(exception: Exception) -> bool:
@@ -129,3 +132,68 @@ def configure_pad_token(tokenizer: PreTrainedTokenizerBase) -> PreTrainedTokeniz
     else:
         tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
     return tokenizer
+
+def sample_ids_from_grad(
+    ids: Tensor,
+    grad: Tensor,
+    search_width: int,
+    topk: int = 256,
+    n_replace: int = 1,
+    not_allowed_ids: Tensor = False,
+):
+    """
+    Returns search_width combinations of token ids based on the token gradient.
+    """
+    n_optim_tokens = len(ids)
+    original_ids = ids.repeat(search_width, 1)
+
+    if not_allowed_ids is not None:
+        grad[:, not_allowed_ids.to(grad.device)] = float("inf")
+
+    topk_ids = (-grad).topk(topk, dim=1).indices
+
+    # Randomly choose positions to replace (n_replace per candidate)
+    sampled_ids_pos = torch.argsort(
+        torch.rand((search_width, n_optim_tokens), device=grad.device)
+    )[
+        ..., :n_replace
+    ]  # shape: (search_width, n_replace)
+
+    sampled_ids_val = torch.gather(
+        topk_ids[sampled_ids_pos],
+        2,
+        torch.randint(0, topk, (search_width, n_replace, 1), device=grad.device),
+    ).squeeze(2)
+
+    new_ids = original_ids.scatter_(1, sampled_ids_pos, sampled_ids_val)
+    return new_ids
+
+
+def filter_ids(ids: Tensor, tokenizer: transformers.PreTrainedTokenizer):
+    """
+    Filters out sequences of token ids that change after retokenization.
+    """
+    ids_decoded = tokenizer.batch_decode(ids)
+    filtered_ids = []
+
+    for i in range(len(ids_decoded)):
+        ids_encoded = tokenizer(
+            ids_decoded[i], return_tensors="pt", add_special_tokens=False
+        ).to(ids.device)["input_ids"][0]
+        if torch.equal(ids[i], ids_encoded):
+            filtered_ids.append(ids[i])
+
+    if not filtered_ids:
+        raise RuntimeError(
+            "No token sequences are the same after decoding and re-encoding. "
+            "Consider setting filter_ids=False or trying a different optim_str_init"
+        )
+
+    return torch.stack(filtered_ids)
+
+def save_image(image, path):
+    image = image.squeeze(0).detach().cpu().numpy()
+    image = image.transpose(1, 2, 0)
+    image = (image * 255).astype(np.uint8)
+    image_pil = Image.fromarray(image)
+    image_pil.save(path)

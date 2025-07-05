@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # List of experiments
-experiments=("exp198")
-ks=(5 20 50)
+experiments=("exp213" "exp214")
+ks=(5 20)
 
 for exp in "${experiments[@]}"; do
-  CUDA_VISIBLE_DEVICES=5 \
+  CUDA_VISIBLE_DEVICES=4 \
     python evaluation.py \
     "$exp" \
     --k "${ks[@]}" \

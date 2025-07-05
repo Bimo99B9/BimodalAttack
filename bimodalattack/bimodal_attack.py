@@ -4,7 +4,6 @@ import time
 import gc
 
 from dataclasses import dataclass
-import numpy as np
 from tqdm import tqdm
 from typing import List, Optional, Tuple, Union
 
@@ -17,10 +16,11 @@ from bimodalattack.utils import (
     INIT_CHARS,
     find_executable_batch_size,
     get_nonascii_toks,
+    sample_ids_from_grad,
+    filter_ids,
+    save_image,
 )
 
-from PIL import Image
-import torchvision.transforms.functional as F
 import os
 
 
@@ -126,68 +126,6 @@ class AttackBuffer:
             optim_str = optim_str.replace("\n", "\\n")
             message += f"\nloss: {loss} | string: {optim_str}"
         logger.info(message)
-
-
-# ---------------------------
-# Candidate sampling helper function
-# ---------------------------
-def sample_ids_from_grad(
-    ids: Tensor,
-    grad: Tensor,
-    search_width: int,
-    topk: int = 256,
-    n_replace: int = 1,
-    not_allowed_ids: Tensor = False,
-):
-    """
-    Returns search_width combinations of token ids based on the token gradient.
-    """
-    n_optim_tokens = len(ids)
-    original_ids = ids.repeat(search_width, 1)
-
-    if not_allowed_ids is not None:
-        grad[:, not_allowed_ids.to(grad.device)] = float("inf")
-
-    topk_ids = (-grad).topk(topk, dim=1).indices
-
-    # Randomly choose positions to replace (n_replace per candidate)
-    sampled_ids_pos = torch.argsort(
-        torch.rand((search_width, n_optim_tokens), device=grad.device)
-    )[
-        ..., :n_replace
-    ]  # shape: (search_width, n_replace)
-
-    sampled_ids_val = torch.gather(
-        topk_ids[sampled_ids_pos],
-        2,
-        torch.randint(0, topk, (search_width, n_replace, 1), device=grad.device),
-    ).squeeze(2)
-
-    new_ids = original_ids.scatter_(1, sampled_ids_pos, sampled_ids_val)
-    return new_ids
-
-
-def filter_ids(ids: Tensor, tokenizer: transformers.PreTrainedTokenizer):
-    """
-    Filters out sequences of token ids that change after retokenization.
-    """
-    ids_decoded = tokenizer.batch_decode(ids)
-    filtered_ids = []
-
-    for i in range(len(ids_decoded)):
-        ids_encoded = tokenizer(
-            ids_decoded[i], return_tensors="pt", add_special_tokens=False
-        ).to(ids.device)["input_ids"][0]
-        if torch.equal(ids[i], ids_encoded):
-            filtered_ids.append(ids[i])
-
-    if not filtered_ids:
-        raise RuntimeError(
-            "No token sequences are the same after decoding and re-encoding. "
-            "Consider setting filter_ids=False or trying a different optim_str_init"
-        )
-
-    return torch.stack(filtered_ids)
 
 
 # ---------------------------
@@ -782,7 +720,7 @@ class BimodalAttack:
 
             # Save image and (optionally) generate debug output.
             if config.pgd_attack:
-                self._save_image(image, os.path.join(images_folder, f"{i}.png"))
+                save_image(image, os.path.join(images_folder, f"{i}.png"))
             if config.debug_output and i % 10 == 0:
                 with torch.no_grad():
                     if config.pgd_attack:
@@ -1430,13 +1368,6 @@ class BimodalAttack:
     #             torch.cuda.empty_cache()
 
     #     return torch.cat(all_loss, dim=0)
-
-    def _save_image(self, image, path):
-        image = image.squeeze(0).detach().cpu().numpy()
-        image = image.transpose(1, 2, 0)
-        image = (image * 255).astype(np.uint8)
-        image_pil = Image.fromarray(image)
-        image_pil.save(path)
 
 
 # ---------------------------

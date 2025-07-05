@@ -208,6 +208,8 @@ def main():
             prompt_string = processor.apply_chat_template(
                 final_messages, add_generation_prompt=True, tokenize=False
             )
+            
+            logging.info(f"[Prompt {i}/{num_prompts}] Prompt string after applying chat template:\n {prompt_string}")
 
             inputs = processor(
                 text=prompt_string, images=adv_img, return_tensors="pt"

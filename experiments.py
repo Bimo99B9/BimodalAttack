@@ -84,7 +84,7 @@ def run_experiment(
     logging.info(f"Experiment folder created: {experiment_folder}")
     torch.cuda.empty_cache()
     gc.collect()
-    set_global_seed(EXPERIMENT_SEED)
+    # set_global_seed(EXPERIMENT_SEED)
 
     with open(
         os.path.join(experiment_folder, "prompts.csv"),
@@ -356,6 +356,12 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--name", required=True)
     p.add_argument("--num_steps", type=int, required=True)
+    p.add_argument(
+        "--optim_str_init",
+        type=str,
+        default="x x x x x x x x x x x x x x x x x x x",
+        help="Initial optimization string.",
+    )
     p.add_argument("--search_width", type=int, required=True)
     p.add_argument("--dynamic_search", type=str2bool, required=True)
     p.add_argument("--min_search_width", type=int, required=True)
@@ -426,15 +432,19 @@ if __name__ == "__main__":
             ]
         )
 
-    raw = Image.open(
-        requests.get(
-            "http://images.cocodataset.org/val2017/000000039769.jpg", stream=True
-        ).raw
-    ).convert("RGB")
+    # raw = Image.open(
+    #     requests.get(
+    #         "https://de.libreoffice.org/assets/Uploads/Discover/Screenshots/Screenshot-01-New-DE.png", stream=True
+    #     ).raw
+    # ).convert("RGB")
+    # image = transform(raw).unsqueeze(0).to(model.device)
+    
+    raw = Image.open("assets/base_libreoffice.png").convert("RGB")
     image = transform(raw).unsqueeze(0).to(model.device)
 
     config_kwargs = {
         "num_steps": args.num_steps,
+        "optim_str_init": args.optim_str_init,
         "search_width": args.search_width,
         "dynamic_search": args.dynamic_search,
         "min_search_width": args.min_search_width,
