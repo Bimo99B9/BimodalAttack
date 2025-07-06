@@ -1,3 +1,5 @@
+# bimodal_attack.py
+
 import copy
 import logging
 import time
@@ -69,7 +71,6 @@ class BimodalAttackConfig:
     pgd_attack: bool = False
     gcg_attack: bool = True
     debug_output: bool = False
-    joint_eval: bool = False
     experiment_folder: str = "experiments/missing_folder"
     images_folder: str = "experiments/missing_folder/images"
     pgd_after_gcg: bool = False
@@ -147,6 +148,16 @@ class BimodalAttack:
         self.processor = processor
         self.config = config
         self.normalize = normalize
+
+        # Define anchors and add them to the tokenizer as special tokens
+        self.start_anchor, self.end_anchor = "<unused0>", "<unused1>"
+        added_tokens = self.tokenizer.add_special_tokens(
+            {"additional_special_tokens": [self.start_anchor, self.end_anchor]}
+        )
+        if added_tokens > 0:
+            logger.info(f"Added {added_tokens} special tokens to the tokenizer.")
+            self.model.resize_token_embeddings(len(self.tokenizer))
+
         self.embedding_layer = model.get_input_embeddings()
         self.not_allowed_ids = (
             None
@@ -158,8 +169,6 @@ class BimodalAttack:
         # Configure tokenizer for batching
         configure_pad_token(self.tokenizer)
         self.tokenizer.padding_side = "left"
-
-        self.start_anchor, self.end_anchor = "<unused0>", "<unused1>"
 
         if model.dtype in (torch.float32, torch.float64):
             logger.warning(
@@ -254,7 +263,9 @@ class BimodalAttack:
             iter_start_time = time.perf_counter()
 
             grad_start_time = time.perf_counter()
-            optim_ids_onehot_grad, image_grad = self.compute_gradient(optim_ids, image)
+            optim_ids_onehot_grad, image_grad, grad_optim_ids = self.compute_gradient(
+                optim_ids, image
+            )
             grad_time = time.perf_counter() - grad_start_time
             gradient_times.append(grad_time)
 
@@ -266,10 +277,14 @@ class BimodalAttack:
                 )
                 current_pgd_time += time.perf_counter() - pgd_start_time
                 if config.gcg_attack:
-                    optim_ids_onehot_grad, _ = self.compute_gradient(optim_ids, image)
+                    (
+                        optim_ids_onehot_grad,
+                        _,
+                        grad_optim_ids,
+                    ) = self.compute_gradient(optim_ids, image)
 
             sample_start_time = time.perf_counter()
-            sampled_ids = self.candidate_sampling(optim_ids, optim_ids_onehot_grad)
+            sampled_ids = self.candidate_sampling(grad_optim_ids, optim_ids_onehot_grad)
             sampling_time = time.perf_counter() - sample_start_time
             sampling_times.append(sampling_time)
 
@@ -282,7 +297,7 @@ class BimodalAttack:
             loss_times.append(loss_time)
 
             if config.pgd_attack and config.pgd_after_gcg:
-                _, image_grad_after = self.compute_gradient(optim_ids, image)
+                _, image_grad_after, _ = self.compute_gradient(optim_ids, image)
                 pgd_start_time = time.perf_counter()
                 image = self.perform_pgd_step(
                     image, config.eps, config.alpha, image_grad_after, image_original
@@ -474,7 +489,7 @@ class BimodalAttack:
 
     def compute_gradient(
         self, optim_ids: Tensor, image: Optional[Tensor]
-    ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
+    ) -> Tuple[Optional[Tensor], Optional[Tensor], Tensor]:
         optim_str = self.tokenizer.decode(
             optim_ids.squeeze(0), skip_special_tokens=True
         )
@@ -541,7 +556,7 @@ class BimodalAttack:
         )
 
         if not grad_targets:
-            return None, None
+            return None, None, optim_ids
 
         grads = torch.autograd.grad(loss, grad_targets, allow_unused=True)
 
@@ -550,9 +565,16 @@ class BimodalAttack:
         image_grad = next(grads_iter, None) if self.config.pgd_attack else None
 
         if optim_grad is not None:
+            # Slice grad to remove anchors
             optim_grad = optim_grad[:, 1:-1, :]
+            # The actual tokens corresponding to the gradient are the placeholder tokens without the anchors
+            actual_optim_ids = placeholder_tokens[:, 1:-1]
+        else:
+            # If not doing GCG, the concept of text gradient doesn't apply,
+            # so the original optim_ids are the ones to use going forward.
+            actual_optim_ids = optim_ids
 
-        return optim_grad, image_grad
+        return optim_grad, image_grad, actual_optim_ids
 
     def perform_pgd_step(
         self,
@@ -578,6 +600,23 @@ class BimodalAttack:
             inputs = self.processor(
                 text=prompt_text, images=images_to_process, return_tensors="pt"
             ).to(self.model.device)
+
+            # Decode the input_ids to see the exact text being sent to the model
+            decoded_input = self.tokenizer.decode(
+                inputs["input_ids"][0], skip_special_tokens=False
+            )
+            logger.info(
+                f"--- MODEL.GENERATE INPUT (DECODED) ---\n{decoded_input}\n--------------------------------------"
+            )
+
+            # Log tensor shapes for debugging
+            log_message = "--- MODEL.GENERATE INPUT (TENSORS) ---\n"
+            for key, tensor in inputs.items():
+                if isinstance(tensor, torch.Tensor):
+                    log_message += f"  - {key}: shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}\n"
+            log_message += "--------------------------------------"
+            logger.info(log_message)
+
             output_ids = self.model.generate(
                 **inputs, max_new_tokens=120, do_sample=False
             )
@@ -594,7 +633,7 @@ class BimodalAttack:
             f"[Iter {i+1}/{self.config.num_steps}] "
             f"Loss: {loss:.4f} | Best Loss: {best_loss:.4f} | "
             f"Suffix: '{suffix}'\n"
-            f"    Timings (s): Total={total_t:.2f} | Grad={grad_t:.2f} | "
+            f"     Timings (s): Total={total_t:.2f} | Grad={grad_t:.2f} | "
             f"Sample={sample_t:.2f} | Loss Eval={loss_t:.2f} | PGD={pgd_t:.2f}"
         )
         logger.info(summary_msg)

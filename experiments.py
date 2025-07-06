@@ -366,7 +366,6 @@ if __name__ == "__main__":
     p.add_argument("--alpha", type=str, required=True)
     p.add_argument("--eps", type=str, required=True)
     p.add_argument("--debug_output", type=str2bool, required=True)
-    p.add_argument("--joint_eval", type=str2bool, required=True)
     p.add_argument(
         "--model", choices=["gemma3", "gemma3n", "llava", "llava-rc"], required=True
     )
@@ -422,7 +421,6 @@ if __name__ == "__main__":
         "debug_output": args.debug_output,
         "alpha_str": args.alpha,
         "eps_str": args.eps,
-        "joint_eval": args.joint_eval,
         "model": args.model,
     }
 
