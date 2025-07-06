@@ -431,15 +431,34 @@ class BimodalAttack:
                     padding=True,
                 ).to(self.model.device)
 
+                prompt_ids = inputs["input_ids"]
+                prompt_attention_mask = inputs["attention_mask"]
+                prompt_len = prompt_ids.shape[1]
+
+                target_ids_batch = self.target_ids.repeat(current_batch_size, 1)
+                target_attention_mask = torch.ones_like(target_ids_batch)
+
+                # Append target to the input ids and attention mask
+                full_input_ids = torch.cat([prompt_ids, target_ids_batch], dim=1)
+                full_attention_mask = torch.cat(
+                    [prompt_attention_mask, target_attention_mask], dim=1
+                )
+
+                model_kwargs = {
+                    "input_ids": full_input_ids,
+                    "attention_mask": full_attention_mask,
+                }
+                if "pixel_values" in inputs:
+                    model_kwargs["pixel_values"] = inputs["pixel_values"]
+
                 with torch.no_grad():
-                    outputs = self.model(**inputs)
+                    outputs = self.model(**model_kwargs)
 
                 logits = outputs.logits
-                target_len = self.target_ids.shape[1]
 
-                # The target is at the end of the sequence. With left padding, this slicing is correct.
-                shift_logits = logits[:, -target_len - 1 : -1, :].contiguous()
-                shift_labels = self.target_ids.repeat(current_batch_size, 1)
+                # Correctly slice logits for the target sequence
+                shift_logits = logits[:, prompt_len - 1 : -1, :].contiguous()
+                shift_labels = target_ids_batch
 
                 # Calculate loss for each item in the batch
                 loss = torch.nn.functional.cross_entropy(
@@ -536,23 +555,47 @@ class BimodalAttack:
             grad_targets.append(one_hot)
 
         differentiable_part_embeds = one_hot @ self.embedding_layer.weight
-        final_embeds = torch.cat(
+
+        prompt_embeds = torch.cat(
             [prefix_embeds, differentiable_part_embeds, postfix_embeds], dim=1
+        )
+        prompt_len = prompt_embeds.shape[1]
+
+        # Get target embeddings and attention mask
+        target_embeds = self.embedding_layer(self.target_ids)
+        target_attention_mask = torch.ones_like(
+            self.target_ids, device=self.model.device
+        )
+
+        # Append target embeddings to the prompt embeddings
+        final_embeds = torch.cat([prompt_embeds, target_embeds], dim=1)
+
+        # Update attention mask to include the target
+        final_attention_mask = torch.cat(
+            [inputs["attention_mask"], target_attention_mask], dim=1
         )
 
         if self.config.pgd_attack:
             inputs["pixel_values"].requires_grad_()
             grad_targets.append(inputs["pixel_values"])
 
-        outputs = self.model(
-            inputs_embeds=final_embeds, attention_mask=inputs["attention_mask"]
-        )
+        # Prepare all keyword arguments for the model
+        model_kwargs = {
+            "inputs_embeds": final_embeds,
+            "attention_mask": final_attention_mask,
+        }
+        if "pixel_values" in inputs and self.config.pgd_attack:
+            model_kwargs["pixel_values"] = inputs["pixel_values"]
+
+        outputs = self.model(**model_kwargs)
         logits = outputs.logits
 
-        target_len = self.target_ids.shape[1]
-        shift_logits = logits[:, -target_len - 1 : -1, :].contiguous()
+        # Correctly slice logits to get predictions for the target sequence
+        shift_logits = logits[:, prompt_len - 1 : -1, :].contiguous()
+        shift_labels = self.target_ids.view(-1)
+
         loss = torch.nn.functional.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)), self.target_ids.view(-1)
+            shift_logits.view(-1, shift_logits.size(-1)), shift_labels
         )
 
         if not grad_targets:
