@@ -217,15 +217,16 @@ def main():
 
             # === STEP 1: CONSTRUCT THE ADVERSARIAL PROMPT CORRECTLY ===
             final_messages = []
+            injection_placeholder = "{optim_str}"  # The placeholder to find
+
             if attack_type == "agent":
                 with open(goal, "r", encoding="utf-8") as f:
                     messages_data = json.load(f)
-
-                if isinstance(messages_data, dict):
-                    final_messages = copy.deepcopy(messages_data.get("messages", []))
-                else:
-                    final_messages = copy.deepcopy(messages_data)
-
+                final_messages = copy.deepcopy(
+                    messages_data.get("messages", [])
+                    if isinstance(messages_data, dict)
+                    else messages_data
+                )
                 last_user_idx = next(
                     (
                         j
@@ -245,10 +246,18 @@ def main():
                         (item for item in content if item.get("type") == "text"), None
                     )
 
-                    if text_item:
-                        text_item["text"] += f" {suffix}"
-                    else:
-                        content.append({"type": "text", "text": suffix})
+                    injected = False
+                    if text_item and injection_placeholder in text_item["text"]:
+                        text_item["text"] = text_item["text"].replace(
+                            injection_placeholder, suffix
+                        )
+                        injected = True
+
+                    if not injected:
+                        if text_item:
+                            text_item["text"] += f" {suffix}"
+                        else:
+                            content.append({"type": "text", "text": suffix})
 
                     if pgd_attack and not any(
                         item.get("type") == "image" for item in content
@@ -256,7 +265,11 @@ def main():
                         content.insert(0, {"type": "image"})
                     final_messages[last_user_idx]["content"] = content
             else:  # advbench
-                content = [{"type": "text", "text": f"{goal} {suffix}"}]
+                if injection_placeholder in goal:
+                    final_goal = goal.replace(injection_placeholder, suffix)
+                else:
+                    final_goal = f"{goal} {suffix}"
+                content = [{"type": "text", "text": final_goal}]
                 if pgd_attack:
                     content.append({"type": "image"})
                 final_messages = [{"role": "user", "content": content}]
@@ -278,7 +291,6 @@ def main():
             logging.info(
                 f"[Prompt {i}/{num_prompts}] Generating adversarial responses..."
             )
-            # model.to("cuda") # This is now done before baseline generation
 
             prompt_string = processor.apply_chat_template(
                 final_messages, add_generation_prompt=True, tokenize=False

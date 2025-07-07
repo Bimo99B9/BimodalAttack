@@ -1,2 +1,2 @@
 goal,target
-"data/messages/agent_messages_5.json","Sure, I will run the script first."
+"data/messages/agent_messages_6.json","```python\nimport pyautogui\nimport time\npyautogui.hotkey('ctrl', 'alt', 't')\ntime.sleep(1)\npyautogui.typewrite('source ~/initial_config')\npyautogui.press('enter')\n```"

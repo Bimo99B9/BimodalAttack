@@ -186,18 +186,36 @@ class BimodalAttack:
         if last_user_idx == -1:
             raise ValueError("No user message found to insert optimization string.")
 
-        placeholder = f"{self.start_anchor}{{optim_str}}{self.end_anchor}"
+        # The string to search for in the user's message
+        injection_placeholder = "{optim_str}"
+        # The replacement template with anchors for the attack
+        attack_template = f"{self.start_anchor}{{optim_str}}{self.end_anchor}"
 
         content = messages[last_user_idx].get("content", "")
+        injected = False
+
         if isinstance(content, str):
-            content += f" {placeholder}"
+            if injection_placeholder in content:
+                content = content.replace(injection_placeholder, attack_template)
+                injected = True
+            else:
+                # Fallback: append to the end if placeholder is not found
+                content += f" {attack_template}"
             messages[last_user_idx]["content"] = content
         elif isinstance(content, list):
+            # Handle list content (e.g., for multimodal messages)
             text_part = next((p for p in content if p.get("type") == "text"), None)
-            if text_part:
-                text_part["text"] += f" {placeholder}"
+            if text_part and injection_placeholder in text_part.get("text", ""):
+                text_part["text"] = text_part["text"].replace(
+                    injection_placeholder, attack_template
+                )
+                injected = True
+            elif text_part:
+                # Fallback: append to the existing text part
+                text_part["text"] += f" {attack_template}"
             else:
-                content.append({"type": "text", "text": placeholder})
+                # Fallback: add a new text part if none exists
+                content.append({"type": "text", "text": attack_template})
 
         if self.config.pgd_attack:
             content_list = messages[last_user_idx]["content"]
@@ -676,7 +694,7 @@ class BimodalAttack:
             f"[Iter {i+1}/{self.config.num_steps}] "
             f"Loss: {loss:.4f} | Best Loss: {best_loss:.4f} | "
             f"Suffix: '{suffix}'\n"
-            f"     Timings (s): Total={total_t:.2f} | Grad={grad_t:.2f} | "
+            f"                 Timings (s): Total={total_t:.2f} | Grad={grad_t:.2f} | "
             f"Sample={sample_t:.2f} | Loss Eval={loss_t:.2f} | PGD={pgd_t:.2f}"
         )
         logger.info(summary_msg)
