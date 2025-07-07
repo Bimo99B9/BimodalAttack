@@ -55,7 +55,7 @@ def get_nonascii_toks(tokenizer, device="cpu"):
         nonascii_toks.append(tokenizer.pad_token_id)
     if tokenizer.unk_token_id is not None:
         nonascii_toks.append(tokenizer.unk_token_id)
-    
+
     logger.debug(f"Found {len(nonascii_toks)} non-ASCII or special tokens to disallow.")
     return torch.tensor(nonascii_toks, device=device)
 
@@ -127,10 +127,14 @@ def sample_ids_from_grad(
 
     num_samples = min(search_width, new_scores.shape[0])
     if num_samples == 0:
-        logger.warning("No valid candidate tokens found after filtering. Returning original IDs.")
+        logger.warning(
+            "No valid candidate tokens found after filtering. Returning original IDs."
+        )
         return ids.unsqueeze(0).to(grad.device)
 
-    logger.debug(f"Sampling {num_samples} new candidates from {new_scores.shape[0]} potential replacements (top-k={topk}).")
+    logger.debug(
+        f"Sampling {num_samples} new candidates from {new_scores.shape[0]} potential replacements (top-k={topk})."
+    )
     sampled_indices = torch.multinomial(
         torch.softmax(new_scores, dim=0),
         num_samples,
@@ -152,18 +156,18 @@ def filter_ids(ids: Tensor, tokenizer: transformers.PreTrainedTokenizer):
     logger.debug(f"Filtering {len(ids)} candidate IDs for tokenization stability.")
     ids_decoded = tokenizer.batch_decode(ids)
     filtered_ids = []
-    
+
     original_device = ids.device
 
     for i, text in enumerate(ids_decoded):
         current_text = str(text)
-        ids_encoded = tokenizer(current_text, return_tensors="pt", add_special_tokens=False).to(
-            original_device
-        )["input_ids"][0]
-        
+        ids_encoded = tokenizer(
+            current_text, return_tensors="pt", add_special_tokens=False
+        ).to(original_device)["input_ids"][0]
+
         original_ids = ids[i]
-        
-        if torch.equal(original_ids[:len(ids_encoded)], ids_encoded):
+
+        if torch.equal(original_ids[: len(ids_encoded)], ids_encoded):
             filtered_ids.append(original_ids)
 
     if not filtered_ids:

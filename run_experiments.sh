@@ -159,9 +159,9 @@ CUDA_VISIBLE_DEVICES=5 python experiments.py \
     --pgd_attack True \
     --gcg_attack True \
     --alpha "4/255" \
-    --eps "64/255" \
+    --eps "128/255" \
     --debug_output True \
-    > logs/experiments_agents_gemma3n_joint.out 2>&1
+    > logs/experiments_agents_gemma3n_test.out 2>&1
 
 # CUDA_VISIBLE_DEVICES=4 python experiments.py \
 #     --name "Agent Attack - GCG Long" \

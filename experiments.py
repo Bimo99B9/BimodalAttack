@@ -7,6 +7,7 @@ import os
 import random
 import time
 import json
+import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -24,13 +25,6 @@ from utils.experiments_utils import (
     load_model_and_processor,
 )
 
-# Configure root logger for the script itself
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-# Get the logger used in the bimodalattack library
-attack_logger = logging.getLogger("bimodalattack")
-
 
 EXPERIMENT_SEED = 1
 USE_ALL_PROMPTS = False
@@ -39,11 +33,7 @@ ADV_BENCH_FILE = "data/advbench/harmful_behaviors.csv"
 AGENT_BENCH_FILE = "data/agent_behaviors.csv"
 
 os.makedirs("experiments", exist_ok=True)
-
-# This part is conditional on the user's setup, so it's kept as is.
-# advbench_pairs = load_advbench_dataset(ADV_BENCH_FILE)
-# if not USE_ALL_PROMPTS:
-#     advbench_pairs = advbench_pairs[:NUM_PROMPTS]
+os.makedirs("logs", exist_ok=True)
 
 
 def set_global_seed(seed):
@@ -80,9 +70,9 @@ def run_experiment(
     processor,
     tokenizer,
     image,
+    experiment_folder,  # Pass the folder down
 ):
-    experiment_folder = get_experiment_folder()
-    logging.info(f"Experiment folder created: {experiment_folder}")
+    logging.info(f"Experiment folder: {experiment_folder}")
     torch.cuda.empty_cache()
     gc.collect()
     # set_global_seed(EXPERIMENT_SEED)
@@ -110,6 +100,10 @@ def run_experiment(
 
     for idx, (goal, target_text) in enumerate(advbench_pairs, start=1):
         images_folder = get_images_folder(experiment_folder, idx)
+
+        # Use the verbosity setting from the command-line args
+        verbosity_str = "DEBUG" if config_kwargs.get("debug_output") else "INFO"
+
         config = BimodalAttackConfig(
             **{
                 k: v
@@ -117,12 +111,14 @@ def run_experiment(
                 if not k.endswith("_str") and k != "model"
             },
             seed=EXPERIMENT_SEED,
-            verbosity="INFO",  # Set default verbosity here, can be changed to DEBUG for more detail
+            verbosity=verbosity_str,
             experiment_folder=experiment_folder,
             images_folder=images_folder,
         )
-        # Set the verbosity for the attack logger specifically
-        attack_logger.setLevel(getattr(logging, config.verbosity.upper(), logging.INFO))
+
+        logging.getLogger("bimodalattack").setLevel(
+            getattr(logging, config.verbosity.upper())
+        )
 
         logging.info(f"--- Running prompt-target pair {idx}/{len(advbench_pairs)} ---")
 
@@ -374,6 +370,51 @@ if __name__ == "__main__":
     p.add_argument("--target", type=str, help="Custom target text (required if --goal)")
     args = p.parse_args()
 
+    # === Create Experiment Folder ===
+    # This folder will store all outputs: logs, plots, and results.
+    experiment_folder = get_experiment_folder()
+
+    # === Setup Logging ===
+    log_level = logging.DEBUG if args.debug_output else logging.INFO
+    log_file_path = os.path.join(experiment_folder, "run.log")
+
+    # Configure the root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # Remove any existing handlers to avoid duplicates
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Create a formatter for a clean log style
+    formatter = logging.Formatter(
+        fmt="[%(asctime)s - %(levelname)s - %(name)s:%(lineno)d] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Create a handler to write logs to a file
+    file_handler = logging.FileHandler(log_file_path, mode="w", encoding="utf-8")
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(formatter)
+
+    # Create a handler to stream logs to the console
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)  # Keep console output concise
+    stream_handler.setFormatter(formatter)
+
+    # Add handlers to the root logger and bimodalattack logger
+    bimodalattack_logger = logging.getLogger("bimodalattack")
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
+    bimodalattack_logger.addHandler(file_handler)
+    bimodalattack_logger.addHandler(stream_handler)
+    bimodalattack_logger.propagate = False  # Prevent double-logging
+
+    logging.info(f"Logging setup complete. Log file will be saved to: {log_file_path}")
+    logging.info("--- Experiment Arguments ---")
+    logging.info(json.dumps(vars(args), indent=2, default=str))
+    logging.info("----------------------------")
+
     if args.attack_type == "agent":
         adv_pairs = load_advbench_dataset(AGENT_BENCH_FILE)
     elif args.goal:
@@ -398,13 +439,6 @@ if __name__ == "__main__":
 
     model, processor = load_model_and_processor(MODEL_ID)
     tokenizer = processor.tokenizer
-
-    # raw = Image.open(
-    #     requests.get(
-    #         "https://de.libreoffice.org/assets/Uploads/Discover/Screenshots/Screenshot-01-New-DE.png", stream=True
-    #     ).raw
-    # ).convert("RGB")
-    # image = transform(raw).unsqueeze(0).to(model.device)
 
     image = Image.open("assets/original_image.jpg").convert("RGB")
 
@@ -433,4 +467,5 @@ if __name__ == "__main__":
         processor,
         tokenizer,
         image,
+        experiment_folder,  # Pass created folder
     )
