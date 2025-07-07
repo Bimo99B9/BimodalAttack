@@ -9,6 +9,9 @@ from transformers import PreTrainedTokenizerBase
 import numpy as np
 from PIL import Image
 from typing import Optional
+import logging
+
+logger = logging.getLogger("bimodalattack")
 
 INIT_CHARS = [
     ".",
@@ -52,7 +55,8 @@ def get_nonascii_toks(tokenizer, device="cpu"):
         nonascii_toks.append(tokenizer.pad_token_id)
     if tokenizer.unk_token_id is not None:
         nonascii_toks.append(tokenizer.unk_token_id)
-
+    
+    logger.debug(f"Found {len(nonascii_toks)} non-ASCII or special tokens to disallow.")
     return torch.tensor(nonascii_toks, device=device)
 
 
@@ -75,54 +79,20 @@ def should_reduce_batch_size(exception: Exception) -> bool:
     return False
 
 
-def find_executable_batch_size(
-    function: callable = None, starting_batch_size: int = 128
-):
-    """
-    A decorator that automatically finds an executable batch size by halving it
-    on resource-related runtime errors.
-    """
-    if function is None:
-        return functools.partial(
-            find_executable_batch_size, starting_batch_size=starting_batch_size
-        )
-
-    batch_size = starting_batch_size
-
-    def decorator(*args, **kwargs):
-        nonlocal batch_size
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        while True:
-            if batch_size == 0:
-                raise RuntimeError("No executable batch size found, reached zero.")
-            try:
-                return function(batch_size, *args, **kwargs)
-            except Exception as e:
-                if should_reduce_batch_size(e):
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    batch_size //= 2
-                    print(
-                        f"Resource error caught. Decreasing batch size to: {batch_size}"
-                    )
-                else:
-                    raise
-
-    return decorator
-
-
 def configure_pad_token(tokenizer: PreTrainedTokenizerBase) -> PreTrainedTokenizerBase:
     """Sets the pad token for a tokenizer if it is not already set."""
     if tokenizer.pad_token:
         return tokenizer
 
+    logger.warning("Tokenizer does not have a pad token. Trying to set one.")
     if tokenizer.unk_token:
         tokenizer.pad_token_id = tokenizer.unk_token_id
+        logger.info(f"Set pad_token_id to unk_token_id: {tokenizer.unk_token_id}")
     elif tokenizer.eos_token:
         tokenizer.pad_token_id = tokenizer.eos_token_id
+        logger.info(f"Set pad_token_id to eos_token_id: {tokenizer.eos_token_id}")
     else:
+        logger.info("Adding a new pad token: <|pad|>")
         tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
     return tokenizer
 
@@ -140,7 +110,7 @@ def sample_ids_from_grad(
     ids = ids.cpu()
 
     if torch.isnan(grad).any() or torch.isinf(grad).any():
-        print("Warning: NaN or Inf found in gradient tensor. Sanitizing.")
+        logger.warning("NaN or Inf found in gradient tensor. Sanitizing.")
         grad = torch.nan_to_num(grad, nan=-torch.inf)
 
     L, V = grad.shape
@@ -157,8 +127,10 @@ def sample_ids_from_grad(
 
     num_samples = min(search_width, new_scores.shape[0])
     if num_samples == 0:
+        logger.warning("No valid candidate tokens found after filtering. Returning original IDs.")
         return ids.unsqueeze(0).to(grad.device)
 
+    logger.debug(f"Sampling {num_samples} new candidates from {new_scores.shape[0]} potential replacements (top-k={topk}).")
     sampled_indices = torch.multinomial(
         torch.softmax(new_scores, dim=0),
         num_samples,
@@ -177,27 +149,36 @@ def sample_ids_from_grad(
 
 def filter_ids(ids: Tensor, tokenizer: transformers.PreTrainedTokenizer):
     """Filters out token sequences that are not stable after re-tokenization."""
+    logger.debug(f"Filtering {len(ids)} candidate IDs for tokenization stability.")
     ids_decoded = tokenizer.batch_decode(ids)
     filtered_ids = []
+    
+    original_device = ids.device
 
     for i, text in enumerate(ids_decoded):
-        ids_encoded = tokenizer(text, return_tensors="pt", add_special_tokens=False).to(
-            ids.device
+        current_text = str(text)
+        ids_encoded = tokenizer(current_text, return_tensors="pt", add_special_tokens=False).to(
+            original_device
         )["input_ids"][0]
-        if torch.equal(ids[i], ids_encoded):
-            filtered_ids.append(ids[i])
+        
+        original_ids = ids[i]
+        
+        if torch.equal(original_ids[:len(ids_encoded)], ids_encoded):
+            filtered_ids.append(original_ids)
 
     if not filtered_ids:
-        raise RuntimeError(
+        logger.error(
             "No token sequences are the same after decoding and re-encoding. "
-            "Consider setting filter_ids=False or trying a different optim_str_init."
+            "This can happen with complex tokens. Consider setting filter_ids=False or using a simpler init string."
         )
+        return ids
 
     return torch.stack(filtered_ids)
 
 
 def save_image(image, path):
     """Saves a tensor image to a file."""
+    logger.debug(f"Saving image to {path}")
     image = image.squeeze(0).detach().cpu().numpy()
     image = image.transpose(1, 2, 0)
     image = (image * 255).astype(np.uint8)

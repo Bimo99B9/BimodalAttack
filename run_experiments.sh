@@ -153,7 +153,7 @@ CUDA_VISIBLE_DEVICES=5 python experiments.py \
     --optim_str_init "x x x x x x x x x x x x x x x x x x x" \
     --model "gemma3n" \
     --num_steps 300 \
-    --search_width 256 \
+    --search_width 64 \
     --dynamic_search False \
     --min_search_width 64 \
     --pgd_attack True \

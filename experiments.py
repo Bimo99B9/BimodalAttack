@@ -24,9 +24,13 @@ from utils.experiments_utils import (
     load_model_and_processor,
 )
 
+# Configure root logger for the script itself
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+# Get the logger used in the bimodalattack library
+attack_logger = logging.getLogger("bimodalattack")
+
 
 EXPERIMENT_SEED = 1
 USE_ALL_PROMPTS = False
@@ -113,10 +117,13 @@ def run_experiment(
                 if not k.endswith("_str") and k != "model"
             },
             seed=EXPERIMENT_SEED,
-            verbosity="DEBUG",
+            verbosity="INFO",  # Set default verbosity here, can be changed to DEBUG for more detail
             experiment_folder=experiment_folder,
             images_folder=images_folder,
         )
+        # Set the verbosity for the attack logger specifically
+        attack_logger.setLevel(getattr(logging, config.verbosity.upper(), logging.INFO))
+
         logging.info(f"--- Running prompt-target pair {idx}/{len(advbench_pairs)} ---")
 
         if attack_type == "agent":
@@ -141,14 +148,7 @@ def run_experiment(
         try:
             start_time = time.time()
             result = bimodalattack.run(
-                model,
-                tokenizer,
-                processor,
-                messages,
-                goal,
-                target_text,
-                image,
-                config
+                model, tokenizer, processor, messages, goal, target_text, image, config
             )
             run_time = time.time() - start_time
             run_loss = result.best_loss
@@ -405,7 +405,7 @@ if __name__ == "__main__":
     #     ).raw
     # ).convert("RGB")
     # image = transform(raw).unsqueeze(0).to(model.device)
-    
+
     image = Image.open("assets/original_image.jpg").convert("RGB")
 
     config_kwargs = {
