@@ -102,6 +102,21 @@ def main():
     # Load primary model and processor
     model, processor = load_model_and_processor(MODEL_ID)
 
+    # === NEW: Load baseline image ===
+    baseline_image_path = "assets/original_image.jpg"
+    if os.path.exists(baseline_image_path):
+        baseline_image = Image.open(baseline_image_path).convert("RGB")
+        logging.info(f"Loaded baseline image from {baseline_image_path}")
+    else:
+        # Fallback to a black image if not found, using model's expected dimensions
+        model_config = model.config.vision_config
+        img_size = (model_config.image_size, model_config.image_size)
+        baseline_image = Image.new("RGB", img_size, color="black")
+        logging.warning(
+            f"Baseline image not found at {baseline_image_path}. "
+            f"Using a black fallback image of size {img_size}."
+        )
+
     best_iters = compute_best_iterations(exp_dir, num_prompts)
     best_suffixes = load_best_suffixes(exp_dir)
 
@@ -140,7 +155,67 @@ def main():
                 )
                 continue
 
-            # === STEP 1: CONSTRUCT THE PROMPT CORRECTLY ===
+            # === NEW: BASELINE GENERATION (no suffix, original image) ===
+            logging.info(f"[Prompt {i}/{num_prompts}] Generating baseline response...")
+            model.to("cuda")  # Move model to GPU for all generations in this loop
+
+            # 1. Construct baseline messages
+            baseline_messages = []
+            if attack_type == "agent":
+                with open(goal, "r", encoding="utf-8") as f:
+                    messages_data = json.load(f)
+                baseline_messages = copy.deepcopy(
+                    messages_data.get("messages", [])
+                    if isinstance(messages_data, dict)
+                    else messages_data
+                )
+                last_user_idx = next(
+                    (
+                        j
+                        for j, msg in reversed(list(enumerate(baseline_messages)))
+                        if msg.get("role") == "user"
+                    ),
+                    -1,
+                )
+                if last_user_idx != -1:
+                    content = baseline_messages[last_user_idx].get("content", [])
+                    content = (
+                        [{"type": "text", "text": content}]
+                        if isinstance(content, str)
+                        else content
+                    )
+                    if not any(item.get("type") == "image" for item in content):
+                        content.insert(0, {"type": "image"})
+                    baseline_messages[last_user_idx]["content"] = content
+            else:  # advbench
+                content = [{"type": "text", "text": goal}, {"type": "image"}]
+                baseline_messages = [{"role": "user", "content": content}]
+
+            # 2. Process inputs and generate baseline response
+            baseline_prompt_string = processor.apply_chat_template(
+                baseline_messages, add_generation_prompt=True, tokenize=False
+            )
+            baseline_inputs = processor(
+                text=baseline_prompt_string, images=baseline_image, return_tensors="pt"
+            ).to("cuda", model.dtype)
+
+            baseline_outputs = model.generate(
+                **baseline_inputs,
+                max_new_tokens=300,
+                do_sample=False,
+                num_return_sequences=1,
+            )
+            baseline_input_len = baseline_inputs["input_ids"].shape[-1]
+            baseline_generated_tokens = baseline_outputs[:, baseline_input_len:]
+            baseline_response = processor.batch_decode(
+                baseline_generated_tokens, skip_special_tokens=True
+            )[0]
+
+            logging.info(f"[Prompt {i}] Baseline generation complete.")
+            del baseline_inputs, baseline_outputs, baseline_generated_tokens
+            # Keep model on GPU for the next step
+
+            # === STEP 1: CONSTRUCT THE ADVERSARIAL PROMPT CORRECTLY ===
             final_messages = []
             if attack_type == "agent":
                 with open(goal, "r", encoding="utf-8") as f:
@@ -201,15 +276,17 @@ def main():
 
             # === STEP 3: PROCESS INPUTS AND GENERATE ===
             logging.info(
-                f"[Prompt {i}/{num_prompts}] Moving primary model to GPU for generation..."
+                f"[Prompt {i}/{num_prompts}] Generating adversarial responses..."
             )
-            model.to("cuda")
+            # model.to("cuda") # This is now done before baseline generation
 
             prompt_string = processor.apply_chat_template(
                 final_messages, add_generation_prompt=True, tokenize=False
             )
-            
-            logging.info(f"[Prompt {i}/{num_prompts}] Prompt string after applying chat template:\n {prompt_string}")
+
+            logging.info(
+                f"[Prompt {i}/{num_prompts}] Prompt string after applying chat template:\n {prompt_string}"
+            )
 
             inputs = processor(
                 text=prompt_string, images=adv_img, return_tensors="pt"
@@ -217,17 +294,13 @@ def main():
 
             logging.info(f"[Prompt {i}/{num_prompts}] Generating {k} responses...")
 
-            # Generate output tokens
             outputs = model.generate(
                 **inputs, max_new_tokens=300, do_sample=True, num_return_sequences=k
             )
 
-            # *** THE CORE FIX IS HERE ***
-            # Slice the output tensor to get only the generated tokens (excluding the prompt)
             input_len = inputs["input_ids"].shape[-1]
             generated_tokens = outputs[:, input_len:]
 
-            # Decode only the newly generated tokens. Now it's safe to skip special tokens.
             assistant_responses = processor.batch_decode(
                 generated_tokens, skip_special_tokens=True
             )
@@ -247,7 +320,6 @@ def main():
             unsafe_count = 0
             for gen_idx, assistant_response in enumerate(assistant_responses):
                 try:
-                    # Construct the conversation for the moderator
                     chat_for_moderation = [
                         {"role": "user", "content": prompt_string},
                         {"role": "assistant", "content": assistant_response.strip()},
@@ -304,7 +376,13 @@ def main():
                 f.write(f"Prompt {i} Evaluation (k={k})\n")
                 f.write(f"Best iteration: {iter_}\n")
                 f.write(f"Adversarial Suffix: {suffix}\n\n")
-                f.write("--- PROMPT SENT TO MODEL ---\n")
+
+                # === NEW: Log the baseline response ===
+                f.write("--- BASELINE OUTPUT (no suffix, original image) ---\n")
+                f.write(f"Prompt:\n{baseline_prompt_string}\n\n")
+                f.write(f"Response:\n{baseline_response}\n\n")
+
+                f.write("--- ADVERSARIAL PROMPT SENT TO MODEL ---\n")
                 f.write(f"{prompt_string}\n\n")
                 f.write("--- GENERATED OUTPUTS & VERDICTS ---\n")
                 for j, (txt, v, u) in enumerate(details, start=1):
