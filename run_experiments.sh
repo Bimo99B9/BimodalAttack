@@ -153,8 +153,8 @@ set -e
 #     --attack_type agent \
 #     --optim_str_init "x x x x x x x x x x x x x x x x x x x" \
 #     --model "gemma3" \
-#     --num_steps 300 \
-#     --search_width 128 \
+#     --num_steps 600 \
+#     --search_width 256 \
 #     --dynamic_search False \
 #     --min_search_width 64 \
 #     --pgd_attack True \
@@ -169,8 +169,8 @@ CUDA_VISIBLE_DEVICES=5 python experiments.py \
     --attack_type advbench \
     --optim_str_init "x x x x x x x x x x x x x x x x x x x" \
     --model "gemma3n" \
-    --num_steps 300 \
-    --search_width 64 \
+    --num_steps 600 \
+    --search_width 256 \
     --dynamic_search False \
     --min_search_width 64 \
     --pgd_attack True \

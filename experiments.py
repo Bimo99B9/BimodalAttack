@@ -424,6 +424,15 @@ if __name__ == "__main__":
     else:
         adv_pairs = load_advbench_dataset(ADV_BENCH_FILE)
 
+    if not USE_ALL_PROMPTS and not args.goal:
+        num_to_run = min(NUM_PROMPTS, len(adv_pairs))
+        adv_pairs = adv_pairs[:num_to_run]
+        logging.info(
+            f"Running on the first {num_to_run} prompts (USE_ALL_PROMPTS is False)."
+        )
+    elif not args.goal:
+        logging.info("Running on all available prompts (USE_ALL_PROMPTS is True).")
+
     alpha = fraction_type(args.alpha)
     eps = fraction_type(args.eps)
 
@@ -467,5 +476,5 @@ if __name__ == "__main__":
         processor,
         tokenizer,
         image,
-        experiment_folder,  # Pass created folder
+        experiment_folder,
     )
