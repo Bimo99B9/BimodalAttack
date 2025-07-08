@@ -30,8 +30,6 @@ from bimodalattack.utils import (
 # ---------------------------
 # Logging configuration
 # ---------------------------
-# The logger is now configured in the main experiment script for better control.
-# This ensures consistency and allows directing logs to both console and file.
 logger = logging.getLogger("bimodalattack")
 
 
@@ -43,9 +41,7 @@ class BimodalAttackConfig:
     num_steps: int = 250
     optim_str_init: Union[str, List[str]] = "x x x x x x x x x x x x x x x x x x x"
     search_width: int = 512
-    batch_size: Optional[int] = (
-        None  # This will be the starting batch size for evaluation
-    )
+    batch_size: Optional[int] = None
     topk: int = 256
     n_replace: int = 1
     buffer_size: int = 0
@@ -223,7 +219,6 @@ class BimodalAttack:
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
 
-        # Prepare templates and log initial parameters
         self.messages_template, self.prompt_template_str = (
             self._prepare_message_template(messages)
         )
@@ -242,11 +237,16 @@ class BimodalAttack:
         logger.info("=" * 80)
 
         if config.pgd_attack and image is not None:
-            logger.info("Processing initial image for PGD attack.")
-            image = self.processor(text="", images=image, return_tensors="pt").to(
-                self.model.device
-            )["pixel_values"]
+            logger.info("Processing initial image for PGD (bimodal) attack.")
+            if not isinstance(image, torch.Tensor):
+                image = self.processor(text="", images=image, return_tensors="pt").to(
+                    self.model.device
+                )["pixel_values"]
             logger.debug(f"Initial image tensor shape: {image.shape}")
+        else:
+            if config.gcg_attack:
+                logger.info("PGD attack is disabled. Running a text-only (GCG) attack.")
+            image = None
 
         self.target_ids = self.tokenizer(
             target, add_special_tokens=False, return_tensors="pt"
@@ -270,7 +270,9 @@ class BimodalAttack:
         best_loss = float("inf")
         best_optim_ids = optim_ids.clone()
         image_original, best_image = (
-            (image.clone(), image.clone()) if config.pgd_attack else (None, None)
+            (image.clone(), image.clone())
+            if config.pgd_attack and image is not None
+            else (None, None)
         )
 
         for i in tqdm(range(config.num_steps), desc="Bimodal Attack"):
@@ -279,7 +281,6 @@ class BimodalAttack:
             current_pgd_time = 0.0
 
             logger.debug(f"\n{'='*20} Iteration {i+1}/{config.num_steps} {'='*20}")
-            # GCG Step
             if config.gcg_attack:
                 logger.debug("--- GCG GRAD START ---")
                 grad_start_time = time.perf_counter()
@@ -301,8 +302,7 @@ class BimodalAttack:
                 sampled_ids = optim_ids
                 sampling_time = 0.0
 
-            # PGD Step
-            if config.pgd_attack:
+            if config.pgd_attack and image is not None:
                 logger.debug("--- PGD STEP START ---")
                 pgd_grad_start_time = time.perf_counter()
                 image_grad = self.compute_image_gradient(optim_ids, image)
@@ -319,7 +319,6 @@ class BimodalAttack:
             sampling_times.append(sampling_time)
             pgd_times.append(current_pgd_time)
 
-            # Evaluation Step
             logger.debug("--- CANDIDATE EVALUATION START ---")
             loss_start_time = time.perf_counter()
             candidate_losses = self._compute_candidates_loss(sampled_ids, image)
@@ -351,7 +350,7 @@ class BimodalAttack:
                 )
                 best_loss = current_loss
                 best_optim_ids = optim_ids.clone()
-                if config.pgd_attack:
+                if config.pgd_attack and image is not None:
                     best_image = image.clone()
                     logger.debug("Updated best_image with current perturbed image.")
 
@@ -374,7 +373,7 @@ class BimodalAttack:
                 current_pgd_time,
             )
 
-            if config.pgd_attack:
+            if config.pgd_attack and image is not None:
                 save_image(image, os.path.join(config.images_folder, f"{i}.png"))
             if self.stop_flag:
                 logger.info(
@@ -432,14 +431,12 @@ class BimodalAttack:
     def _compute_candidates_loss(
         self, sampled_ids: Tensor, image: Optional[Tensor]
     ) -> Tensor:
-        # If executable batch size is not yet determined, find it by starting with a high value.
         if self.executable_batch_size is None:
             self.executable_batch_size = self.config.search_width
             logger.info(
                 f"Determining executable batch size, starting with {self.executable_batch_size}..."
             )
 
-        # Inner function to compute loss for a given batch size.
         def _compute_loss_for_batch(batch_size: int):
             all_losses = []
             logger.debug(f"Computing candidate loss with batch size: {batch_size}")
@@ -448,20 +445,25 @@ class BimodalAttack:
                 current_batch_size = ids_batch.shape[0]
                 prompt_texts = self._get_prompt_texts_for_candidates(ids_batch)
 
-                # logger.debug(
-                #     f"Processing batch of {len(prompt_texts)}. Example prompt text:\n{prompt_texts[0]}"
-                # )
-                logger.debug(
-                    f"Processing batch of {len(prompt_texts)}."
-                )
+                logger.debug(f"Processing batch of {len(prompt_texts)}.")
 
+                #
+                # === FIX STARTS HERE ===
+                #
+                # Create a list of images to match the batch of text prompts. This is
+                # the format the processor expects for multi-text, single-image batching.
                 images_to_process = (
-                    [image] * current_batch_size
-                    if self.config.pgd_attack and image is not None
-                    else None
+                    [image] * current_batch_size if image is not None else None
                 )
-                if images_to_process:
-                    logger.debug(f"Image tensor attached with shape: {image.shape}")
+                #
+                # === FIX ENDS HERE ===
+                #
+
+                if images_to_process is not None:
+                    # The number of images in the list should match the number of texts.
+                    logger.debug(
+                        f"Image list of length {len(images_to_process)} attached."
+                    )
 
                 inputs = self.processor(
                     text=prompt_texts,
@@ -484,7 +486,7 @@ class BimodalAttack:
                     "input_ids": full_input_ids,
                     "attention_mask": full_attention_mask,
                 }
-                if "pixel_values" in inputs:
+                if "pixel_values" in inputs and inputs["pixel_values"] is not None:
                     model_kwargs["pixel_values"] = inputs["pixel_values"]
 
                 with torch.no_grad():
@@ -522,16 +524,13 @@ class BimodalAttack:
 
             return torch.cat(all_losses, dim=0)
 
-        # Loop to find and set the executable batch size, which persists in self.executable_batch_size
         while self.executable_batch_size > 0:
             try:
                 gc.collect()
                 torch.cuda.empty_cache()
 
-                # Try to compute loss with the current batch size
                 losses = _compute_loss_for_batch(self.executable_batch_size)
 
-                # If successful for the first time, log the found batch size
                 if "batch_size_found" not in self.__dict__:
                     logger.info(
                         f"Successfully set executable batch size to: {self.executable_batch_size}. This will be used for all subsequent steps."
@@ -592,12 +591,11 @@ class BimodalAttack:
         prompt_text = self.prompt_template_str.format(optim_str=optim_str)
         logger.debug(f"Computing text gradient for prompt: {prompt_text[:100]}...")
 
-        images_to_process = image if self.config.pgd_attack else None
-        inputs = self.processor(
-            text=prompt_text, images=images_to_process, return_tensors="pt"
-        ).to(self.model.device)
-        prompt_ids_batch = inputs["input_ids"]
+        inputs = self.processor(text=prompt_text, images=image, return_tensors="pt").to(
+            self.model.device
+        )
 
+        prompt_ids_batch = inputs["input_ids"]
         start_idx, end_idx = self.get_optim_slicing_indices(prompt_ids_batch.squeeze(0))
 
         prefix_ids = prompt_ids_batch[:, : start_idx + 1]
@@ -605,8 +603,9 @@ class BimodalAttack:
         postfix_ids = prompt_ids_batch[:, end_idx:]
         logger.debug(f"Differentiating {differentiable_tokens.shape[1]} tokens.")
 
-        prefix_embeds = self.embedding_layer(prefix_ids)
-        postfix_embeds = self.embedding_layer(postfix_ids)
+        prefix_embeds = self.embedding_layer(prefix_ids).detach()
+        postfix_embeds = self.embedding_layer(postfix_ids).detach()
+        target_embeds = self.embedding_layer(self.target_ids).detach()
 
         one_hot = torch.nn.functional.one_hot(
             differentiable_tokens, num_classes=self.embedding_layer.num_embeddings
@@ -618,9 +617,6 @@ class BimodalAttack:
         prompt_embeds = torch.cat(
             [prefix_embeds, differentiable_embeds, postfix_embeds], dim=1
         )
-        logger.debug("Text gradient calculation is unimodal (text-only embeddings).")
-
-        target_embeds = self.embedding_layer(self.target_ids)
         final_embeds = torch.cat([prompt_embeds, target_embeds], dim=1)
 
         target_attention_mask = torch.ones_like(self.target_ids)
@@ -628,9 +624,12 @@ class BimodalAttack:
             [inputs["attention_mask"], target_attention_mask], dim=1
         )
 
-        outputs = self.model(
-            inputs_embeds=final_embeds, attention_mask=final_attention_mask
-        )
+        model_kwargs = {
+            "inputs_embeds": final_embeds,
+            "attention_mask": final_attention_mask,
+        }
+
+        outputs = self.model(**model_kwargs)
         logits = outputs.logits
 
         prompt_len = prompt_embeds.shape[1]
@@ -722,7 +721,7 @@ class BimodalAttack:
     def generate_test_output(self, optim_ids: Tensor, image: Optional[Tensor]) -> str:
         with torch.no_grad():
             prompt_text = self._get_prompt_texts_for_candidates(optim_ids)[0]
-            images_to_process = image if self.config.pgd_attack else None
+            images_to_process = image if image is not None else None
             logger.info(f"Generating debug output for prompt: {prompt_text[:250]}...")
             if images_to_process is not None:
                 logger.info("Attaching current perturbed image to generation.")

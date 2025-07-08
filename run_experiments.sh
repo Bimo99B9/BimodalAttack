@@ -127,41 +127,41 @@ set -e
 #     --debug_output False \
 #     --joint_eval False \
 #     --model "gemma3n" \
-    > logs/experiments_gemma3n_pgd.out 2>&1
+    # > logs/experiments_gemma3n_pgd.out 2>&1
 
 ### Agents
 
-# CUDA_VISIBLE_DEVICES=4 python experiments.py \
-#     --name "Agent Attack - GCG" \
-#     --attack_type agent \
-#     --optim_str_init "x x x x x x x x x x x x x x x x x x x" \
-#     --model "gemma3n" \
-#     --num_steps 300 \
-#     --search_width 256 \
-#     --dynamic_search False \
-#     --min_search_width 64 \
-#     --pgd_attack False \
-#     --gcg_attack True \
-#     --alpha "4/255" \
-#     --eps "64/255" \
-#     --debug_output True \
-#     > logs/experiments_agents_gemma3n_gcg.out 2>&1
-
 CUDA_VISIBLE_DEVICES=5 python experiments.py \
-    --name "Agent Attack - Joint" \
+    --name "Agent Attack - GCG" \
     --attack_type agent \
     --optim_str_init "x x x x x x x x x x x x x x x x x x x" \
     --model "gemma3n" \
     --num_steps 300 \
-    --search_width 64 \
+    --search_width 256 \
     --dynamic_search False \
     --min_search_width 64 \
-    --pgd_attack True \
+    --pgd_attack False \
     --gcg_attack True \
     --alpha "4/255" \
-    --eps "128/255" \
+    --eps "64/255" \
     --debug_output True \
-    > logs/experiments_agents_gemma3n_test.out 2>&1
+    > logs/experiments_agents_gemma3n_gcg.out 2>&1
+
+# CUDA_VISIBLE_DEVICES=4 python experiments.py \
+#     --name "Agent Attack - Joint" \
+#     --attack_type agent \
+#     --optim_str_init "x x x x x x x x x x x x x x x x x x x" \
+#     --model "gemma3n" \
+#     --num_steps 300 \
+#     --search_width 64 \
+#     --dynamic_search False \
+#     --min_search_width 64 \
+#     --pgd_attack True \
+#     --gcg_attack True \
+#     --alpha "4/255" \
+#     --eps "128/255" \
+#     --debug_output True \
+#     > logs/experiments_agents_gemma3n_joint.out 2>&1
 
 # CUDA_VISIBLE_DEVICES=4 python experiments.py \
 #     --name "Agent Attack - GCG Long" \
