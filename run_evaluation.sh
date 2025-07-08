@@ -5,7 +5,7 @@ experiments=("exp1" "exp2")
 ks=(5 20)
 
 for exp in "${experiments[@]}"; do
-  CUDA_VISIBLE_DEVICES=0 \
+  CUDA_VISIBLE_DEVICES=1 \
     python evaluation.py \
     "$exp" \
     --k "${ks[@]}" \

@@ -239,9 +239,17 @@ class BimodalAttack:
         if config.pgd_attack and image is not None:
             logger.info("Processing initial image for PGD (bimodal) attack.")
             if not isinstance(image, torch.Tensor):
-                image = self.processor(text="", images=image, return_tensors="pt").to(
-                    self.model.device
-                )["pixel_values"]
+                if self.processor.__class__.__name__ == "Gemma3Processor":
+                    logger.debug(
+                        "Gemma3Processor detected. Converting image to tensor."
+                    )
+                    image = self.processor(text="<start_of_image>", images=image, return_tensors="pt")[
+                        "pixel_values"
+                    ].to(self.model.device)
+                else:
+                    image = self.processor(text="", images=image, return_tensors="pt").to(
+                        self.model.device
+                    )["pixel_values"]
             logger.debug(f"Initial image tensor shape: {image.shape}")
         else:
             if config.gcg_attack:
@@ -447,17 +455,11 @@ class BimodalAttack:
 
                 logger.debug(f"Processing batch of {len(prompt_texts)}.")
 
-                #
-                # === FIX STARTS HERE ===
-                #
                 # Create a list of images to match the batch of text prompts. This is
                 # the format the processor expects for multi-text, single-image batching.
                 images_to_process = (
                     [image] * current_batch_size if image is not None else None
                 )
-                #
-                # === FIX ENDS HERE ===
-                #
 
                 if images_to_process is not None:
                     # The number of images in the list should match the number of texts.
