@@ -62,8 +62,6 @@ class BimodalAttackConfig:
     debug_output: bool = False
     experiment_folder: str = "experiments/missing_folder"
     images_folder: str = "experiments/missing_folder/images"
-    pgd_after_gcg: bool = False
-    model: str = "llava"
 
 
 @dataclass

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # List of experiments
-experiments=("exp1" "exp2")
+experiments=("exp1" "exp2" "exp7")
 ks=(5 20)
 
 for exp in "${experiments[@]}"; do
