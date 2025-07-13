@@ -451,7 +451,7 @@ class BimodalAttack:
                 current_batch_size = ids_batch.shape[0]
                 prompt_texts = self._get_prompt_texts_for_candidates(ids_batch)
 
-                logger.debug(f"Processing batch of {len(prompt_texts)}.")
+                # logger.debug(f"Processing batch of {len(prompt_texts)}.")
 
                 # Create a list of images to match the batch of text prompts. This is
                 # the format the processor expects for multi-text, single-image batching.
@@ -459,11 +459,11 @@ class BimodalAttack:
                     [image] * current_batch_size if image is not None else None
                 )
 
-                if images_to_process is not None:
-                    # The number of images in the list should match the number of texts.
-                    logger.debug(
-                        f"Image list of length {len(images_to_process)} attached."
-                    )
+                # if images_to_process is not None:
+                #     # The number of images in the list should match the number of texts.
+                #     logger.debug(
+                #         f"Image list of length {len(images_to_process)} attached."
+                #     )
 
                 inputs = self.processor(
                     text=prompt_texts,

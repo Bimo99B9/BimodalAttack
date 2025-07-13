@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # List of experiments
-experiments=("exp1" "exp2" "exp7")
-ks=(5 20)
+experiments=("exp9")
+ks=(5 20 50)
 
 for exp in "${experiments[@]}"; do
   CUDA_VISIBLE_DEVICES=1 \

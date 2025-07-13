@@ -449,7 +449,7 @@ if __name__ == "__main__":
     model, processor = load_model_and_processor(MODEL_ID)
     tokenizer = processor.tokenizer
 
-    image = Image.open("assets/original_image.jpg").convert("RGB")
+    image = Image.open("assets/base_libreoffice.png").convert("RGB")
 
     config_kwargs = {
         "num_steps": args.num_steps,
